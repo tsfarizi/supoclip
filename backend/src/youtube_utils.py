@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
+import redis.asyncio as redis
 import requests
 import yt_dlp
 
@@ -26,6 +27,13 @@ YOUTUBE_METADATA_PROVIDER_DATA_API = "youtube_data_api"
 YOUTUBE_DOWNLOAD_PROVIDER_YTDLP = "yt_dlp"
 YOUTUBE_DOWNLOAD_PROVIDER_APIFY = "apify"
 YOUTUBE_DATA_API_URL = "https://www.googleapis.com/youtube/v3/videos"
+
+# Per-video download lock: serializes file writes to /app/uploads/<video_id>.*
+# across concurrent worker tasks. Polling envelope must stay well below the
+# lock TTL (3600s) so a waiting job never overtakes a live download.
+VIDEO_DOWNLOAD_LOCK_KEY_PREFIX = "lock:video_download:"
+VIDEO_DOWNLOAD_LOCK_POLL_INTERVAL_SECONDS = 5.0
+VIDEO_DOWNLOAD_LOCK_MAX_WAIT_SECONDS = 1800.0
 
 
 class YouTubeDownloader:
@@ -628,13 +636,144 @@ def download_youtube_video(
     return None
 
 
+async def acquire_video_download_lock(
+    video_id: str,
+    timeout: float = 3600.0,
+) -> bool:
+    """
+    Acquire an exclusive Redis lock for a video download.
+
+    Returns True if this caller holds the lock, False if another job holds it.
+    Redis connection failures are re-raised so the caller never proceeds
+    unguarded (the worker retry machinery is the correct recovery path).
+    """
+    config = get_config()
+    redis_client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        password=config.redis_password,
+        decode_responses=True,
+    )
+    try:
+        acquired = await redis_client.set(
+            f"{VIDEO_DOWNLOAD_LOCK_KEY_PREFIX}{video_id}",
+            "1",
+            nx=True,
+            ex=max(1, int(timeout)),
+        )
+        return bool(acquired)
+    except Exception as exc:
+        logger.error(
+            "Failed to acquire video download lock for %s: %s", video_id, exc
+        )
+        raise
+    finally:
+        await redis_client.aclose()
+
+
+async def release_video_download_lock(video_id: str) -> None:
+    """
+    Release the video download lock for a video.
+
+    Never raises: DEL on a missing key is a no-op and Redis failures during
+    cleanup are logged, not propagated.
+    """
+    config = get_config()
+    redis_client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        password=config.redis_password,
+        decode_responses=True,
+    )
+    try:
+        await redis_client.delete(f"{VIDEO_DOWNLOAD_LOCK_KEY_PREFIX}{video_id}")
+    except Exception as exc:
+        logger.warning(
+            "Failed to release video download lock for %s: %s", video_id, exc
+        )
+    finally:
+        await redis_client.aclose()
+
+
+def _find_existing_download(video_id: str) -> Optional[Path]:
+    """Return the best already-downloaded video file for video_id, if present."""
+    downloader = YouTubeDownloader()
+    candidates = [
+        file_path
+        for file_path in downloader.temp_dir.glob(f"{video_id}.*")
+        if file_path.is_file()
+        and file_path.suffix.lower() in [".mp4", ".mkv", ".webm"]
+        and not file_path.name.endswith(".part")
+    ]
+    if not candidates:
+        return None
+    ranked = sorted(
+        candidates,
+        key=lambda p: (_get_local_video_dimensions(p)[0], p.stat().st_size),
+        reverse=True,
+    )
+    return ranked[0]
+
+
 async def async_download_youtube_video(
     url: str,
     max_retries: int = 3,
     task_id: Optional[str] = None,
 ) -> Optional[Path]:
+    """
+    Download a YouTube video guarded by a per-video Redis lock.
+
+    Concurrent jobs for the same video_id wait for the lock before writing to
+    /app/uploads/<video_id>.* instead of racing each other. After acquiring the
+    lock, an already-downloaded file is reused so a waiting job never wipes the
+    file the first job is still rendering from.
+    """
     logger.info(f"Starting async YouTube download: {url}")
-    return await asyncio.to_thread(download_youtube_video, url, max_retries, task_id)
+
+    video_id = get_youtube_video_id(url)
+    if not video_id:
+        logger.error("Could not extract video ID from URL: %s", url)
+        return None
+
+    lock_acquired = await acquire_video_download_lock(video_id)
+    if not lock_acquired:
+        logger.warning(
+            "Video download lock for %s is held by another job; waiting up to %.0fs",
+            video_id,
+            VIDEO_DOWNLOAD_LOCK_MAX_WAIT_SECONDS,
+        )
+        deadline = time.monotonic() + VIDEO_DOWNLOAD_LOCK_MAX_WAIT_SECONDS
+        while not lock_acquired:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "Timed out waiting for video download lock for %s after %.0fs",
+                    video_id,
+                    VIDEO_DOWNLOAD_LOCK_MAX_WAIT_SECONDS,
+                )
+                return None
+            await asyncio.sleep(
+                min(VIDEO_DOWNLOAD_LOCK_POLL_INTERVAL_SECONDS, remaining)
+            )
+            lock_acquired = await acquire_video_download_lock(video_id)
+        logger.info("Acquired video download lock for %s", video_id)
+
+    try:
+        existing = _find_existing_download(video_id)
+        if existing is not None:
+            logger.info(
+                "Reusing cached download for %s: %s (%.1fMB)",
+                video_id,
+                existing.name,
+                existing.stat().st_size / 1024 / 1024,
+            )
+            return existing
+        return await asyncio.to_thread(
+            download_youtube_video, url, max_retries, task_id
+        )
+    finally:
+        # Only reached with a lock we hold: the timeout path returned above.
+        await release_video_download_lock(video_id)
 
 
 def get_video_duration(url: str) -> Optional[int]:

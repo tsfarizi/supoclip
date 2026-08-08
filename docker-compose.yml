@@ -3,7 +3,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      target: ${FRONTEND_BUILD_TARGET:-development}
+      target: ${FRONTEND_BUILD_TARGET:-runner}
       args:
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
         - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3107}
@@ -19,10 +19,7 @@ services:
     container_name: supoclip-frontend
     ports:
       - "127.0.0.1:3001:3107"
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
-      - ./frontend/prisma:/app/prisma
+    # Development: set FRONTEND_BUILD_TARGET=development and re-add ./frontend/src:/app/src bind-mount
     environment:
       - NODE_ENV=${NODE_ENV:-development}
       - NEXT_TELEMETRY_DISABLED=1
@@ -76,6 +73,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: api
     container_name: supoclip-backend
     platform: linux/amd64
     command: [".venv/bin/uvicorn", "src.main_refactored:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -132,6 +130,7 @@ services:
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3107}
       - DISCORD_FEEDBACK_WEBHOOK_URL=${DISCORD_FEEDBACK_WEBHOOK_URL}
       - DISCORD_SALES_WEBHOOK_URL=${DISCORD_SALES_WEBHOOK_URL}
+    mem_limit: 1g
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -181,6 +180,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: worker
     container_name: supoclip-worker
     platform: linux/amd64
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
@@ -235,6 +235,7 @@ services:
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3107}
       - TRANSCRIPT_PROVIDER=${TRANSCRIPT_PROVIDER:-assemblyai}
       - ASR_BASE_URL=${ASR_BASE_URL:-http://asr:8765}
+    mem_limit: 3g
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -249,11 +250,13 @@ services:
   # Local transcription service (Qwen3-ASR) — self-hosted alternative to
   # AssemblyAI. Runs on the host GPU via CDI; the worker calls it at
   # http://asr:8765 when TRANSCRIPT_PROVIDER=local_asr.
+  # Optional: only start this ASR service on machines with a GPU (podman compose --profile gpu up)
   asr:
     build:
       context: ./asr
       dockerfile: Dockerfile
     container_name: supoclip-asr
+    profiles: ["gpu"]
     devices:
       - "nvidia.com/gpu=all"
     volumes:

@@ -8,7 +8,6 @@ dependencies = [
     "apify-client>=1.8.1",
     "fastapi>=0.110.0",
     "uvicorn>=0.27.0",
-    "openai-whisper>=20250625",
     "pydantic-ai>=1.89.1",
     "setuptools-rust>=1.11.1",
     "asyncpg>=0.29.0",
@@ -16,13 +15,11 @@ dependencies = [
     "alembic>=1.13.0",
     "python-dotenv>=1.0.0",
     "yt-dlp>=2025.7.21",
-    "whisper>=1.1.10",
     "greenlet>=2.0.0",
     "opencv-python>=4.8.0",
     "srt-equalizer>=0.1.10",
     "assemblyai>=0.35.0",
     "srt>=3.5.3",
-    "mediapipe>=0.10.0",
     "numpy>=1.24.0",
     "aiofiles>=23.2.0",
     "sse-starlette>=1.6.5",
@@ -32,6 +29,9 @@ dependencies = [
     "requests>=2.32.0",
     "cryptography>=42.0.0",
 ]
+
+[project.optional-dependencies]
+cv = ["mediapipe>=0.10.0"]
 
 [dependency-groups]
 dev = [
