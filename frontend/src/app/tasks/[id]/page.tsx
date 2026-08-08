@@ -1215,21 +1215,36 @@ export default function TaskPage() {
                     </Select>
                   </div>
 
-                  <div className="rounded-lg border bg-gray-50 p-3 space-y-3">
+                  <div className="rounded-lg border bg-gray-50 p-3 space-y-2">
                     <div>
                       <div className="text-sm font-medium text-gray-900">B-roll footage</div>
                       <div className="text-xs text-gray-500">Cut to stock footage from Pexels at key moments.</div>
                     </div>
 
-                    <label className="flex items-center gap-2 text-sm text-gray-700">
-                      <input
-                        type="checkbox"
-                        checked={projectIncludeBroll}
-                        onChange={(e) => setProjectIncludeBroll(e.target.checked)}
-                        className="rounded"
-                      />
-                      Include B-roll
-                    </label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setProjectIncludeBroll(false)}
+                        className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                          !projectIncludeBroll
+                            ? "border-gray-900 bg-gray-900 text-white"
+                            : "border-gray-300 bg-white text-gray-700 hover:bg-gray-100"
+                        }`}
+                      >
+                        No B-roll
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setProjectIncludeBroll(true)}
+                        className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                          projectIncludeBroll
+                            ? "border-indigo-600 bg-indigo-600 text-white"
+                            : "border-gray-300 bg-white text-gray-700 hover:bg-gray-100"
+                        }`}
+                      >
+                        Use B-roll
+                      </button>
+                    </div>
                   </div>
 
                   <div className="rounded-lg border bg-gray-50 p-3 space-y-3">

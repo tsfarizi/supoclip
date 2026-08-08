@@ -215,6 +215,7 @@ export default function HomeApp() {
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("vertical");
   const [addSubtitles, setAddSubtitles] = useState(true);
   const [includeBroll, setIncludeBroll] = useState(false);
+  const [pexelsConfigured, setPexelsConfigured] = useState<boolean | null>(null);
   const [cutLongPauses, setCutLongPauses] = useState(false);
   const [pauseThresholdMs, setPauseThresholdMs] = useState("900");
   const [removeFillerWords, setRemoveFillerWords] = useState(false);
@@ -228,6 +229,23 @@ export default function HomeApp() {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
   const taskApiUrl = "/api/tasks";
   const youtubeThumbnailUrl = sourceType === "youtube" ? getYouTubeThumbnailUrl(url) : null;
+
+  // Whether the backend has a stock footage provider configured (Pexels).
+  // When it is missing, the B-roll option would silently have no effect.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/broll/status", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!cancelled) setPexelsConfigured(Boolean(data?.configured));
+      })
+      .catch(() => {
+        if (!cancelled) setPexelsConfigured(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshFonts = useCallback(async () => {
     try {
@@ -1035,19 +1053,45 @@ export default function HomeApp() {
                   </div>
 
                   {/* B-roll footage */}
-                  <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
+                  <div className="rounded-lg border bg-stone-50 p-3 space-y-2">
                     <div className="flex items-center gap-3">
                       <Film className="w-4 h-4 text-purple-500" />
                       <div>
-                        <h3 className="text-sm font-medium text-stone-900">Add B-roll footage</h3>
+                        <h3 className="text-sm font-medium text-stone-900">B-roll footage</h3>
                         <p className="text-xs text-stone-500">Cut to stock footage from Pexels at key moments</p>
                       </div>
                     </div>
-                    <Switch
-                      checked={includeBroll}
-                      onCheckedChange={setIncludeBroll}
-                      disabled={generationControlsDisabled}
-                    />
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIncludeBroll(false)}
+                        disabled={generationControlsDisabled}
+                        className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                          !includeBroll
+                            ? "border-stone-900 bg-stone-900 text-white"
+                            : "border-stone-300 bg-white text-stone-700 hover:bg-stone-100"
+                        }`}
+                      >
+                        No B-roll
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIncludeBroll(true)}
+                        disabled={generationControlsDisabled}
+                        className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                          includeBroll
+                            ? "border-purple-600 bg-purple-600 text-white"
+                            : "border-stone-300 bg-white text-stone-700 hover:bg-stone-100"
+                        }`}
+                      >
+                        Use B-roll
+                      </button>
+                    </div>
+                    {pexelsConfigured === false && (
+                      <p className="text-xs text-amber-600">
+                        Pexels is not configured on this server — B-roll will be skipped during render.
+                      </p>
+                    )}
                   </div>
 
                   <div className="rounded-lg border bg-stone-50 p-3 space-y-3">
