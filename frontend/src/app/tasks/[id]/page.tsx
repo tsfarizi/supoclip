@@ -138,6 +138,7 @@ export default function TaskPage() {
   const [projectFontSize, setProjectFontSize] = useState<number | null>(null);
   const [projectFontColor, setProjectFontColor] = useState<string | null>(null);
   const [projectCaptionTemplate, setProjectCaptionTemplate] = useState("default");
+  const [projectIncludeBroll, setProjectIncludeBroll] = useState(false);
   const [projectCutLongPauses, setProjectCutLongPauses] = useState(false);
   const [projectPauseThresholdMs, setProjectPauseThresholdMs] = useState("900");
   const [projectRemoveFillerWords, setProjectRemoveFillerWords] = useState(false);
@@ -197,6 +198,7 @@ export default function TaskPage() {
         setProjectFontSize(typeof taskData.font_size === "number" ? taskData.font_size : null);
         setProjectFontColor(taskData.font_color ?? null);
         setProjectCaptionTemplate(taskData.caption_template || "default");
+        setProjectIncludeBroll(Boolean(taskData.include_broll));
         setProjectCutLongPauses(Boolean(taskData.cut_long_pauses));
         setProjectPauseThresholdMs(String(taskData.pause_threshold_ms || 900));
         setProjectRemoveFillerWords(Boolean(taskData.remove_filler_words));
@@ -578,6 +580,7 @@ export default function TaskPage() {
         body: JSON.stringify({
           ...fontOptions,
           caption_template: projectCaptionTemplate,
+          include_broll: projectIncludeBroll,
           cut_long_pauses: projectCutLongPauses,
           pause_threshold_ms: safePauseThreshold,
           remove_filler_words: projectRemoveFillerWords,
@@ -1210,6 +1213,23 @@ export default function TaskPage() {
                         {availableTemplates.length === 0 && <SelectItem value="default">Default</SelectItem>}
                       </SelectContent>
                     </Select>
+                  </div>
+
+                  <div className="rounded-lg border bg-gray-50 p-3 space-y-3">
+                    <div>
+                      <div className="text-sm font-medium text-gray-900">B-roll footage</div>
+                      <div className="text-xs text-gray-500">Cut to stock footage from Pexels at key moments.</div>
+                    </div>
+
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={projectIncludeBroll}
+                        onChange={(e) => setProjectIncludeBroll(e.target.checked)}
+                        className="rounded"
+                      />
+                      Include B-roll
+                    </label>
                   </div>
 
                   <div className="rounded-lg border bg-gray-50 p-3 space-y-3">

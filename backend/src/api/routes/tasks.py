@@ -290,7 +290,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             processing_mode,
             output_format,
             add_subtitles,
-            cleanup_settings,
+            include_broll=include_broll,
+            cleanup_settings=cleanup_settings,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
@@ -1051,7 +1052,8 @@ async def resume_task(
             processing_mode,
             output_format,
             add_subtitles,
-            cleanup_settings,
+            include_broll=bool(task.get("include_broll", False)),
+            cleanup_settings=cleanup_settings,
         )
 
         return {"message": "Task resumed", "job_id": job_id}

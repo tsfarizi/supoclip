@@ -25,6 +25,8 @@ class Config:
         self.assembly_ai_http_timeout_seconds = int(
             os.getenv("ASSEMBLY_AI_HTTP_TIMEOUT_SECONDS", "900")
         )
+        self.transcript_provider = os.getenv("TRANSCRIPT_PROVIDER", "assemblyai").strip().lower()
+        self.asr_base_url = os.getenv("ASR_BASE_URL", "http://localhost:8765").rstrip("/")
         self.pexels_api_key = self._get_runtime_setting("PEXELS_API_KEY")
         self.apify_api_token = self._get_runtime_setting("APIFY_API_TOKEN")
         self.youtube_download_provider = self._normalize_youtube_download_provider(

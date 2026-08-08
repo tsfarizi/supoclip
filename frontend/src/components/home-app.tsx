@@ -214,6 +214,7 @@ export default function HomeApp() {
   const [availableTemplates, setAvailableTemplates] = useState<Array<{ id: string, name: string, description: string, animation: string, font_family?: string, font_size?: number, font_color?: string }>>([]);
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("vertical");
   const [addSubtitles, setAddSubtitles] = useState(true);
+  const [includeBroll, setIncludeBroll] = useState(false);
   const [cutLongPauses, setCutLongPauses] = useState(false);
   const [pauseThresholdMs, setPauseThresholdMs] = useState("900");
   const [removeFillerWords, setRemoveFillerWords] = useState(false);
@@ -501,6 +502,7 @@ export default function HomeApp() {
           processing_mode: "fast",
           output_format: outputFormat,
           add_subtitles: addSubtitles,
+          include_broll: includeBroll,
           cut_long_pauses: cutLongPauses,
           pause_threshold_ms: normalizedPauseThreshold,
           remove_filler_words: removeFillerWords,
@@ -523,6 +525,7 @@ export default function HomeApp() {
         caption_template: captionTemplate,
         output_format: outputFormat,
         add_subtitles: addSubtitles,
+        include_broll: includeBroll,
         cut_long_pauses: cutLongPauses,
         pause_threshold_ms: normalizedPauseThreshold,
         remove_filler_words: removeFillerWords,
@@ -1027,6 +1030,22 @@ export default function HomeApp() {
                     <Switch
                       checked={addSubtitles}
                       onCheckedChange={setAddSubtitles}
+                      disabled={generationControlsDisabled}
+                    />
+                  </div>
+
+                  {/* B-roll footage */}
+                  <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
+                    <div className="flex items-center gap-3">
+                      <Film className="w-4 h-4 text-purple-500" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Add B-roll footage</h3>
+                        <p className="text-xs text-stone-500">Cut to stock footage from Pexels at key moments</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={includeBroll}
+                      onCheckedChange={setIncludeBroll}
                       disabled={generationControlsDisabled}
                     />
                   </div>

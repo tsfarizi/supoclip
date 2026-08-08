@@ -323,3 +323,33 @@ async def get_broll_suggestions_for_clip(
             found_keywords.append(keyword)
 
     return found_keywords[:3]  # Return top 3 matches
+
+
+async def build_fallback_broll_opportunities(
+    clip_text: str,
+    clip_start_seconds: float,
+    clip_end_seconds: float,
+) -> List[Dict[str, Any]]:
+    """Build B-roll opportunities from clip keywords for regeneration flows.
+
+    Used when clips are regenerated from stored segments and the AI analysis is not
+    re-run. Timestamps are absolute source-video seconds formatted as MM:SS so they
+    match the contract of fetch_broll_for_opportunities.
+    """
+    clip_duration = clip_end_seconds - clip_start_seconds
+    if clip_duration <= 0:
+        return []
+
+    keywords = await get_broll_suggestions_for_clip(clip_text, clip_duration)
+    opportunities = []
+    for i, keyword in enumerate(keywords[:2]):
+        offset = int(clip_start_seconds + clip_duration * (0.35 + 0.35 * i))
+        opportunities.append(
+            {
+                "search_term": keyword,
+                "timestamp": f"{offset // 60:02d}:{offset % 60:02d}",
+                "duration": 3.0,
+                "context": f"Visual for '{keyword}' mentioned in clip",
+            }
+        )
+    return opportunities

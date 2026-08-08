@@ -267,6 +267,123 @@ def get_video_transcript(video_path: Path, speech_model: str = "universal") -> s
         raise
 
 
+class WordShim:
+    """Minimal word object exposing the AssemblyAI word contract for cache consumers."""
+
+    def __init__(
+        self,
+        text: str,
+        start: int,
+        end: int,
+        confidence: float = 1.0,
+        speaker=None,
+    ):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.confidence = confidence
+        self.speaker = speaker
+
+
+class AsrTranscriptShim:
+    """Transcript-shaped object for consumers that expect AssemblyAI-like transcripts."""
+
+    def __init__(self, text: str, words: List[WordShim]):
+        self.text = text
+        self.words = words
+        self.utterances = None
+
+
+def _asr_error_detail(response: httpx.Response) -> str:
+    """Extract a readable error message from a local ASR error response."""
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("detail", "error", "message"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+    return response.text[:200] or f"HTTP {response.status_code}"
+
+
+def get_video_transcript_local(video_path: Path, speech_model: str = "universal") -> str:
+    """Get transcript from the local ASR service with word-level timing."""
+    runtime_config = get_config()
+    base_url = runtime_config.asr_base_url
+    timeout = runtime_config.assembly_ai_http_timeout_seconds
+
+    logger.info(f"Getting transcript from local ASR: {video_path}")
+    audio_path = _prepare_audio_for_transcription(video_path)
+
+    payload = None
+    with open(audio_path, "rb") as audio_file:
+        for attempt in range(1, 4):
+            # Re-uploads re-read from the start; a failed attempt may leave the offset mid-file.
+            audio_file.seek(0)
+            try:
+                with httpx.Client(timeout=timeout) as client:
+                    response = client.post(
+                        f"{base_url}/v1/transcribe",
+                        files={"audio": (audio_path.name, audio_file, "audio/mpeg")},
+                    )
+                if response.status_code in (400, 413, 422):
+                    raise RuntimeError(
+                        f"Local ASR rejected request (status {response.status_code}): "
+                        f"{_asr_error_detail(response)}"
+                    )
+                if response.status_code >= 400:
+                    logger.warning(
+                        "Local ASR returned status %s on attempt %s/3",
+                        response.status_code,
+                        attempt,
+                    )
+                    if attempt == 3:
+                        raise RuntimeError(
+                            f"Local ASR transcription failed (status {response.status_code}): "
+                            f"{_asr_error_detail(response)}"
+                        )
+                    time.sleep(2 if attempt == 1 else 5)
+                    continue
+                payload = response.json()
+                break
+            except httpx.TransportError as e:
+                logger.warning(
+                    "Local ASR request failed on attempt %s/3: %s", attempt, e
+                )
+                if attempt == 3:
+                    raise RuntimeError(f"Local ASR transcription failed: {e}") from e
+                time.sleep(2 if attempt == 1 else 5)
+
+    words = [
+        WordShim(text=w["text"], start=int(w["start_ms"]), end=int(w["end_ms"]))
+        for w in payload.get("words", []) or []
+    ]
+    shim = AsrTranscriptShim(text=payload.get("text", ""), words=words)
+
+    if payload.get("timestamps") is False or not words:
+        logger.warning(
+            "Local ASR returned no timestamps; subtitles will degrade to hook title only"
+        )
+
+    cache_transcript_data(video_path, shim)
+
+    if not shim.words:
+        # No word timestamps (e.g. ASR language outside the aligner set): the
+        # analysis pipeline still receives the raw transcript text; only the
+        # timestamped subtitle formatting degrades.
+        formatted_lines: List[str] = []
+        result = (shim.text or "").strip()
+    else:
+        formatted_lines = format_transcript_for_analysis(shim)
+        result = "\n".join(formatted_lines)
+    logger.info(
+        f"Local ASR transcript formatted: {len(formatted_lines)} segments, {len(result)} chars"
+    )
+    return result
+
+
 def cache_transcript_data(video_path: Path, transcript) -> None:
     """Cache AssemblyAI transcript data for subtitle generation."""
     cache_path = video_path.with_suffix(".transcript_cache.json")
@@ -3356,6 +3473,14 @@ def create_clips_from_segments(
 
             if success:
                 save_clip_source_ranges(clip_path, keep_ranges)
+                broll_final = apply_broll_suggestions_to_clip(
+                    clip_path,
+                    segment.get("broll_suggestions") or [],
+                    keep_ranges,
+                )
+                if broll_final:
+                    clip_path.unlink()
+                    broll_final.rename(clip_path)
                 cleaned_duration = sum(end - start for start, end in keep_ranges)
                 clip_info = {
                     "clip_id": i + 1,
@@ -3741,3 +3866,63 @@ def apply_broll_to_clip(
     except Exception as e:
         logger.error(f"Error applying B-roll to clip: {e}")
         return False
+
+
+def map_source_seconds_to_clip_time(
+    keep_ranges: List[Tuple[float, float]], source_seconds: float
+) -> Optional[float]:
+    """Map absolute source-video seconds to rendered-clip-local seconds through keep ranges.
+
+    Returns None when the source second falls inside a cut gap (pauses/filler removed
+    during cleanup) or beyond the last kept range, so callers can skip those insertions.
+    """
+    elapsed = 0.0
+    for start, end in keep_ranges:
+        if source_seconds < start:
+            return None
+        if source_seconds <= end:
+            return elapsed + (source_seconds - start)
+        elapsed += end - start
+    return None
+
+
+def apply_broll_suggestions_to_clip(
+    clip_path: Path,
+    broll_suggestions: List[Dict[str, Any]],
+    keep_ranges: List[Tuple[float, float]],
+) -> Optional[Path]:
+    """Composite B-roll suggestions (absolute source-video timestamps) onto a rendered clip.
+
+    Maps each suggestion's timestamp through the clip's keep ranges into clip-local time,
+    then runs the existing compositing pass. Returns the path of the composited file when
+    at least one suggestion was applied, otherwise None; the original clip is untouched.
+    """
+    if not broll_suggestions:
+        return None
+
+    clip_duration = sum(end - start for start, end in keep_ranges)
+    mapped_suggestions = []
+    for suggestion in broll_suggestions:
+        local_path = suggestion.get("local_path")
+        if not local_path or not Path(local_path).exists():
+            logger.warning(f"B-roll file not found: {local_path}")
+            continue
+        local_time = map_source_seconds_to_clip_time(
+            keep_ranges, float(suggestion.get("timestamp", 0))
+        )
+        if local_time is None or local_time >= clip_duration - 0.5:
+            logger.info(
+                f"Skipping B-roll at {suggestion.get('timestamp')}s: outside clip timeline"
+            )
+            continue
+        mapped_suggestions.append({**suggestion, "timestamp": round(local_time, 3)})
+
+    if not mapped_suggestions:
+        return None
+
+    final_path = clip_path.with_name(f"{clip_path.stem}_broll{clip_path.suffix}")
+    if not apply_broll_to_clip(clip_path, mapped_suggestions, final_path):
+        return None
+    if not final_path.exists():
+        return None
+    return final_path

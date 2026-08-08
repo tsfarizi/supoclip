@@ -18,8 +18,10 @@ from ..youtube_utils import (
 )
 from ..video_utils import (
     get_video_transcript,
+    get_video_transcript_local,
     create_clips_with_transitions,
     create_optimized_clip,
+    apply_broll_suggestions_to_clip,
     parse_timestamp_to_seconds,
     build_clip_keep_ranges,
     build_keep_ranges_from_source_ranges,
@@ -92,6 +94,72 @@ class VideoService:
         }
 
     @staticmethod
+    async def _attach_broll_suggestions(
+        relevant_parts: Any,
+        segments_json: List[Dict[str, Any]],
+        video_path: Path,
+        task_id: Optional[str],
+        output_format: str,
+    ) -> None:
+        """Fetch stock footage for AI-detected B-roll opportunities and attach them to segments.
+
+        Each fetched suggestion keeps its absolute source-video timestamp; the render step
+        maps it into clip-local time through the clip's keep ranges. Opportunities outside
+        every chosen segment are dropped. Failures degrade gracefully: the task still renders
+        clips without B-roll.
+        """
+        opportunities = getattr(relevant_parts, "broll_opportunities", None) or []
+        if not opportunities:
+            return
+
+        runtime_config = get_config()
+        if not runtime_config.pexels_api_key:
+            logger.warning(
+                "include_broll is on but PEXELS_API_KEY is not configured; skipping B-roll"
+            )
+            return
+
+        # Cap API load per task: 2-4 per segment x up to 5 segments can exceed rate limits.
+        opportunities = list(opportunities)[:8]
+
+        from ..broll import fetch_broll_for_opportunities
+
+        broll_dir = (
+            Path(runtime_config.temp_dir) / "broll" / (task_id or "unknown")
+        )
+        orientation = "portrait" if output_format == "vertical" else "landscape"
+        suggestions = await fetch_broll_for_opportunities(
+            [o.model_dump() if hasattr(o, "model_dump") else o for o in opportunities],
+            broll_dir,
+            orientation=orientation,
+        )
+
+        for suggestion in suggestions:
+            target_segment = None
+            for segment in segments_json:
+                start_seconds = parse_timestamp_to_seconds(
+                    str(segment.get("start_time") or "00:00")
+                )
+                end_seconds = parse_timestamp_to_seconds(
+                    str(segment.get("end_time") or "00:00")
+                )
+                if start_seconds <= suggestion.timestamp <= end_seconds:
+                    target_segment = segment
+                    break
+            if target_segment is None:
+                logger.info(
+                    f"B-roll suggestion at {suggestion.timestamp:.1f}s outside all segments; dropping"
+                )
+                continue
+            target_segment.setdefault("broll_suggestions", []).append(
+                suggestion.model_dump()
+            )
+
+        logger.info(
+            f"Attached B-roll suggestions to {sum(1 for s in segments_json if s.get('broll_suggestions'))} segments"
+        )
+
+    @staticmethod
     def resolve_local_video_path(url: str) -> Path:
         """Resolve uploaded-video references without exposing server filesystem paths."""
         if url.startswith(UPLOAD_URL_PREFIX):
@@ -141,12 +209,23 @@ class VideoService:
         if processing_mode == "fast":
             speech_model = runtime_config.fast_mode_transcript_model
 
-        transcript = await run_in_thread(get_video_transcript, video_path, speech_model)
+        if runtime_config.transcript_provider == "local_asr":
+            transcript = await run_in_thread(
+                get_video_transcript_local, video_path, speech_model
+            )
+        else:
+            transcript = await run_in_thread(
+                get_video_transcript, video_path, speech_model
+            )
         logger.info(f"Transcript generated: {len(transcript)} characters")
         return transcript
 
     @staticmethod
-    async def analyze_transcript(transcript: str, clip_signals: Optional[str] = None) -> Any:
+    async def analyze_transcript(
+        transcript: str,
+        clip_signals: Optional[str] = None,
+        include_broll: bool = False,
+    ) -> Any:
         """
         Analyze transcript with AI to find relevant segments.
         This is already async, no need to wrap.
@@ -155,6 +234,7 @@ class VideoService:
         relevant_parts = await get_most_relevant_parts_by_transcript(
             transcript,
             clip_signals=clip_signals,
+            include_broll=include_broll,
         )
         logger.info(
             f"AI analysis complete: {len(relevant_parts.most_relevant_segments)} segments found"
@@ -281,6 +361,15 @@ class VideoService:
                 return None
 
             save_clip_source_ranges(clip_path, keep_ranges)
+            broll_final = await run_in_thread(
+                apply_broll_suggestions_to_clip,
+                clip_path,
+                segment.get("broll_suggestions") or [],
+                keep_ranges,
+            )
+            if broll_final:
+                clip_path.unlink()
+                broll_final.rename(clip_path)
             cleaned_duration = sum(end - start for start, end in keep_ranges)
             logger.info(
                 f"Created clip {clip_index + 1}: {cleaned_duration:.1f}s"
@@ -347,6 +436,7 @@ class VideoService:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        include_broll: bool = False,
         cached_transcript: Optional[str] = None,
         cached_analysis_json: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
@@ -436,12 +526,18 @@ class VideoService:
                                 self.most_relevant_segments = payload.get(
                                     "most_relevant_segments", []
                                 )
+                                self.broll_opportunities = payload.get(
+                                    "broll_opportunities"
+                                )
 
                         relevant_parts = _SimpleResult(
                             {
                                 "summary": cached_analysis.get("summary"),
                                 "key_topics": cached_analysis.get("key_topics", []),
                                 "most_relevant_segments": segments,
+                                "broll_opportunities": cached_analysis.get(
+                                    "broll_opportunities"
+                                ),
                             }
                         )
                 except Exception:
@@ -460,6 +556,7 @@ class VideoService:
                 relevant_parts = await VideoService.analyze_transcript(
                     transcript,
                     clip_signals=clip_signals,
+                    include_broll=include_broll,
                 )
 
             # Step 4: Create clips
@@ -526,6 +623,15 @@ class VideoService:
                     )
                 ]
 
+            if include_broll:
+                await VideoService._attach_broll_suggestions(
+                    relevant_parts,
+                    segments_json,
+                    video_path,
+                    task_id,
+                    output_format,
+                )
+
             return {
                 "segments": segments_json,
                 "segments_to_render": segments_json,
@@ -541,6 +647,12 @@ class VideoService:
                         if relevant_parts
                         else [],
                         "most_relevant_segments": segments_json,
+                        "broll_opportunities": [
+                            o.model_dump() if hasattr(o, "model_dump") else o
+                            for o in (relevant_parts.broll_opportunities or [])
+                        ]
+                        if include_broll
+                        else [],
                     }
                 ),
             }

@@ -3,7 +3,7 @@ Task service - orchestrates task creation and processing workflow.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -58,9 +58,11 @@ class TaskService:
         self.config = config or get_config()
 
     @staticmethod
-    def _build_cache_key(url: str, source_type: str, processing_mode: str) -> str:
+    def _build_cache_key(
+        url: str, source_type: str, processing_mode: str, include_broll: bool = False
+    ) -> str:
         payload = (
-            f"{source_type}|{processing_mode}|"
+            f"{source_type}|{processing_mode}|{int(include_broll)}|"
             f"{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{url.strip()}"
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -148,6 +150,7 @@ class TaskService:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        include_broll: bool = False,
         progress_callback: Optional[Callable] = None,
         should_cancel: Optional[Callable] = None,
         clip_ready_callback: Optional[Callable] = None,
@@ -161,7 +164,9 @@ class TaskService:
             logger.info(f"Starting processing for task {task_id}")
             started_at = datetime.utcnow()
             stage_timings: Dict[str, float] = {}
-            cache_key = self._build_cache_key(url, source_type, processing_mode)
+            cache_key = self._build_cache_key(
+                url, source_type, processing_mode, include_broll
+            )
 
             cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
             cached_transcript = (
@@ -215,6 +220,7 @@ class TaskService:
                 processing_mode=processing_mode,
                 output_format=output_format,
                 add_subtitles=add_subtitles,
+                include_broll=include_broll,
                 cached_transcript=cached_transcript,
                 cached_analysis_json=cached_analysis_json,
                 progress_callback=update_progress,
@@ -512,6 +518,69 @@ class TaskService:
 
         logger.info(f"Deleted task {task_id} and all associated clips")
 
+    async def _attach_fallback_broll_suggestions(
+        self,
+        segments: List[Dict[str, Any]],
+        task_id: str,
+        output_format: str,
+    ) -> None:
+        """Fetch stock footage from clip-text keywords when regenerating stored segments.
+
+        Regeneration reuses existing segment boundaries without re-running the AI analysis,
+        so B-roll opportunities are derived from the stored clip text instead. Suggestions
+        keep absolute source-video timestamps; the render step maps them into clip-local time.
+        """
+        runtime_config = get_config()
+        if not runtime_config.pexels_api_key:
+            logger.warning(
+                "include_broll is on but PEXELS_API_KEY is not configured; skipping B-roll"
+            )
+            return
+
+        from ..broll import (
+            build_fallback_broll_opportunities,
+            fetch_broll_for_opportunities,
+        )
+
+        opportunities = []
+        segment_bounds = []
+        for segment in segments:
+            try:
+                start_seconds = parse_timestamp_to_seconds(segment["start_time"])
+                end_seconds = parse_timestamp_to_seconds(segment["end_time"])
+            except (KeyError, ValueError, IndexError):
+                continue
+            segment_bounds.append((segment, start_seconds, end_seconds))
+            opportunities.extend(
+                await build_fallback_broll_opportunities(
+                    segment.get("text") or "",
+                    start_seconds,
+                    end_seconds,
+                )
+            )
+
+        if not opportunities:
+            return
+
+        broll_dir = Path(runtime_config.temp_dir) / "broll" / task_id
+        orientation = "portrait" if output_format == "vertical" else "landscape"
+        suggestions = await fetch_broll_for_opportunities(
+            opportunities, broll_dir, orientation=orientation
+        )
+
+        for suggestion in suggestions:
+            for segment, start_seconds, end_seconds in segment_bounds:
+                if start_seconds <= suggestion.timestamp <= end_seconds:
+                    segment.setdefault("broll_suggestions", []).append(
+                        suggestion.model_dump()
+                    )
+                    break
+
+        logger.info(
+            f"Attached fallback B-roll suggestions to "
+            f"{sum(1 for s in segments if s.get('broll_suggestions'))} segments"
+        )
+
     async def update_task_settings(
         self,
         task_id: str,
@@ -542,6 +611,7 @@ class TaskService:
                 font_color,
                 caption_template,
                 cleanup_settings=cleanup_settings,
+                include_broll=include_broll,
             )
 
         return await self.get_task_with_clips(task_id) or {}
@@ -554,6 +624,7 @@ class TaskService:
         font_color: Optional[str],
         caption_template: str,
         cleanup_settings: Optional[Dict[str, Any]] = None,
+        include_broll: bool = False,
     ) -> None:
         """Regenerate all clips in a task using existing segment boundaries."""
         task = await self.task_repo.get_task_by_id(self.db, task_id)
@@ -638,6 +709,11 @@ class TaskService:
                     "hook_type": clip.get("hook_type"),
                     "hook_title": clip.get("hook_title"),
                 }
+            )
+
+        if include_broll:
+            await self._attach_fallback_broll_suggestions(
+                segments, task_id, output_format
             )
 
         clips_info = await self.video_service.create_video_clips(
@@ -864,7 +940,12 @@ class TaskService:
         if source_url and source_type:
             cache_entry = await self.cache_repo.get_cache(
                 self.db,
-                self._build_cache_key(source_url, source_type, processing_mode),
+                self._build_cache_key(
+                    source_url,
+                    source_type,
+                    processing_mode,
+                    bool(task.get("include_broll", False)),
+                ),
             )
             cached_video_path = cache_entry.get("video_path") if cache_entry else None
             if cached_video_path:

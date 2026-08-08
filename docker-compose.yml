@@ -98,6 +98,7 @@ services:
       - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY}
       - ASSEMBLY_AI_HTTP_TIMEOUT_SECONDS=${ASSEMBLY_AI_HTTP_TIMEOUT_SECONDS:-900}
       - APIFY_API_TOKEN=${APIFY_API_TOKEN}
+      - PEXELS_API_KEY=${PEXELS_API_KEY}
       - APIFY_YOUTUBE_DOWNLOADER_ACTOR=${APIFY_YOUTUBE_DOWNLOADER_ACTOR:-epctex/youtube-video-downloader}
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - APIFY_RUN_TIMEOUT_SECONDS=${APIFY_RUN_TIMEOUT_SECONDS:-900}
@@ -112,6 +113,7 @@ services:
       - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-180}
+      - MAX_VIDEO_DURATION=${MAX_VIDEO_DURATION:-5400}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-4}
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-universal}
@@ -199,6 +201,7 @@ services:
       - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY}
       - ASSEMBLY_AI_HTTP_TIMEOUT_SECONDS=${ASSEMBLY_AI_HTTP_TIMEOUT_SECONDS:-900}
       - APIFY_API_TOKEN=${APIFY_API_TOKEN}
+      - PEXELS_API_KEY=${PEXELS_API_KEY}
       - APIFY_YOUTUBE_DOWNLOADER_ACTOR=${APIFY_YOUTUBE_DOWNLOADER_ACTOR:-epctex/youtube-video-downloader}
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - APIFY_RUN_TIMEOUT_SECONDS=${APIFY_RUN_TIMEOUT_SECONDS:-900}
@@ -213,6 +216,7 @@ services:
       - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-180}
+      - MAX_VIDEO_DURATION=${MAX_VIDEO_DURATION:-5400}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-4}
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-universal}
@@ -229,6 +233,8 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - "SES_FROM_EMAIL=${SES_FROM_EMAIL:-SupoClip <onboarding@example.com>}"
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3107}
+      - TRANSCRIPT_PROVIDER=${TRANSCRIPT_PROVIDER:-assemblyai}
+      - ASR_BASE_URL=${ASR_BASE_URL:-http://asr:8765}
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -239,6 +245,35 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+
+  # Local transcription service (Qwen3-ASR) — self-hosted alternative to
+  # AssemblyAI. Runs on the host GPU via CDI; the worker calls it at
+  # http://asr:8765 when TRANSCRIPT_PROVIDER=local_asr.
+  asr:
+    build:
+      context: ./asr
+      dockerfile: Dockerfile
+    container_name: supoclip-asr
+    devices:
+      - "nvidia.com/gpu=all"
+    volumes:
+      - asr_models:/models
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
+      - ASR_ALIGNER=${ASR_ALIGNER:-Qwen/Qwen3-ForcedAligner-0.6B}
+      - ASR_PORT=8765
+      - ASR_REQUEST_TIMEOUT_SECONDS=${ASR_REQUEST_TIMEOUT_SECONDS:-600}
+      - MAX_AUDIO_MB=${MAX_AUDIO_MB:-64}
+    ports:
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8765/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
 
   # Redis for caching and job queues (useful for video processing)
   redis:
@@ -295,6 +330,8 @@ volumes:
   postgres_data:
     driver: local
   mcp_downloads:
+    driver: local
+  asr_models:
     driver: local
 
 networks:

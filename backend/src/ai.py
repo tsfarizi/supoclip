@@ -425,7 +425,9 @@ def build_transcript_analysis_prompt(
     broll_instruction = ""
     if include_broll:
         broll_instruction = (
-            "\n5. Also identify B-roll opportunities for each chosen segment where stock footage could enhance the visual appeal."
+            "\n5. Also identify B-roll opportunities for each chosen segment where stock footage could enhance the visual appeal. "
+            "Each opportunity's \"timestamp\" must be an absolute source-video time in MM:SS format, "
+            "inside that segment's start_time-end_time range."
         )
     signal_section = ""
     if clip_signals:
