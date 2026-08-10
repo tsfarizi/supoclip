@@ -869,7 +869,7 @@ export default function HomeApp() {
           <Link href={`/tasks/${latestTask.id}`} className="block mb-8">
             <div className="flex items-center justify-between p-4 rounded-xl border border-stone-200 bg-stone-50/50 hover:bg-stone-50 transition-colors group">
               <div className="flex items-center gap-4 min-w-0">
-                <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-stone-900 flex items-center justify-center">
+                <div className="shrink-0 w-10 h-10 rounded-lg bg-stone-900 flex items-center justify-center">
                   <Film className="w-5 h-5 text-white" />
                 </div>
                 <div className="min-w-0">
@@ -885,7 +885,7 @@ export default function HomeApp() {
                   </div>
                 </div>
               </div>
-              <div className="flex items-center gap-3 flex-shrink-0">
+              <div className="flex items-center gap-3 shrink-0">
                 {latestTask.status === "completed" ? (
                   <Badge className="bg-green-100 text-green-800 text-xs">
                     <CheckCircle className="w-3 h-3 mr-1" />
@@ -1088,7 +1088,7 @@ export default function HomeApp() {
                       onValueChange={(value) => setOutputFormat(value as OutputFormat)}
                       disabled={generationControlsDisabled}
                     >
-                      <SelectTrigger className="w-[180px] bg-white">
+                      <SelectTrigger className="w-45 bg-white">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1219,7 +1219,7 @@ export default function HomeApp() {
               <div
                 className={`transition-all duration-500 ease-in-out overflow-hidden ${
                   addSubtitles
-                    ? "max-h-[800px] opacity-100"
+                    ? "max-h-200 opacity-100"
                     : "max-h-0 opacity-0 pointer-events-none"
                 }`}
               >
@@ -1493,14 +1493,14 @@ export default function HomeApp() {
 
           {/* Right Column — Phone Preview */}
           <div
-            className={`hidden lg:block flex-shrink-0 overflow-hidden transition-all duration-500 ease-in-out ${
+            className={`hidden lg:block shrink-0 overflow-hidden transition-all duration-500 ease-in-out ${
               sourceType === "upload"
                 ? "w-0 opacity-0"
-                : "w-[340px] opacity-100"
+                : "w-85 opacity-100"
             }`}
           >
             <div
-              className={`w-[340px] transition-all duration-500 ease-in-out ${
+              className={`w-85 transition-all duration-500 ease-in-out ${
                 sourceType === "upload"
                   ? "translate-x-6 scale-[0.97] opacity-0"
                   : "translate-x-0 scale-100 opacity-100"
@@ -1558,11 +1558,11 @@ export default function HomeApp() {
                         style={{ backgroundImage: `url(${youtubeThumbnailUrl})` }}
                       />
                     ) : (
-                      <div className="absolute inset-0 bg-gradient-to-b from-stone-600 via-stone-500 to-stone-700" />
+                      <div className="absolute inset-0 bg-linear-to-b from-stone-600 via-stone-500 to-stone-700" />
                     )}
                     <div className="absolute inset-0 bg-black/20" />
                     {/* Bottom gradient for readability over lower UI */}
-                    <div className="absolute inset-x-0 bottom-0 h-60 bg-gradient-to-t from-black/70 via-black/30 to-transparent z-[1]" />
+                    <div className="absolute inset-x-0 bottom-0 h-60 bg-linear-to-t from-black/70 via-black/30 to-transparent z-1" />
 
                     {/* TikTok-style top navigation */}
                     <div className="absolute top-12 left-0 right-0 z-10 flex justify-center items-center gap-5">

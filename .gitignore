@@ -15,4 +15,11 @@ backend/demo_clips/
 backend/demo_clips_*.log
 backend/run_demo.py
 .local
-data
+data/
+transitions/
+# dependencies (any nested node_modules, e.g. frontend/packages/*, monorepo sub-apps)
+node_modules/
+
+# playwright test artifacts
+test-results/
+playwright-report/

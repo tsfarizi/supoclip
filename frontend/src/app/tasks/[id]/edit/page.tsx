@@ -105,6 +105,8 @@ export default function TaskEditPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transitionSpec, setTransitionSpec] = useState("none");
+  const [availableTransitions, setAvailableTransitions] = useState<{ name: string; display_name: string; kind: string }[]>([]);
 
   const [trimRange, setTrimRange] = useState<[number, number]>([0, 1]);
   const [splitTime, setSplitTime] = useState(1);
@@ -221,6 +223,26 @@ export default function TaskEditPage() {
     };
     void run();
   }, [fetchEditorData]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadTransitions = async () => {
+      try {
+        const response = await fetch("/api/transitions", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          transitions?: { name: string; display_name: string; kind: string }[];
+        };
+        if (!cancelled) setAvailableTransitions(data.transitions || []);
+      } catch {
+        // Leave the list empty; merging without a transition stays valid.
+      }
+    };
+    void loadTransitions();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!selectedClip) return;
@@ -347,7 +369,7 @@ export default function TaskEditPage() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ clip_ids: mergeSelection }),
+        body: JSON.stringify({ clip_ids: mergeSelection, transition: transitionSpec }),
       });
       if (!response.ok) throw new Error(await buildSupportError(response, "Failed to merge selected clips"));
     });
@@ -601,10 +623,10 @@ export default function TaskEditPage() {
       <div className="min-h-screen bg-white p-4">
         <div className="max-w-7xl mx-auto space-y-4">
           <Skeleton className="h-10 w-56" />
-          <Skeleton className="h-[420px] w-full" />
+          <Skeleton className="h-105 w-full" />
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-            <Skeleton className="h-[520px] xl:col-span-7" />
-            <Skeleton className="h-[520px] xl:col-span-5" />
+            <Skeleton className="h-130 xl:col-span-7" />
+            <Skeleton className="h-130 xl:col-span-5" />
           </div>
         </div>
       </div>
@@ -692,7 +714,7 @@ export default function TaskEditPage() {
                           onTimeUpdate={handleTimeUpdate}
                           onPlay={() => setIsPlaying(true)}
                           onPause={() => setIsPlaying(false)}
-                          className="max-h-[600px] max-w-full h-auto w-auto object-contain"
+                          className="max-h-150 max-w-full h-auto w-auto object-contain"
                           style={videoStyle}
                         />
                       </div>
@@ -969,7 +991,29 @@ export default function TaskEditPage() {
               </CardHeader>
               <CardContent className="space-y-3">
                 {mergeSelection.length >= 2 && (
-                  <div className="flex justify-end">
+                  <div className="flex items-center gap-2 justify-end">
+                    <Select value={transitionSpec} onValueChange={setTransitionSpec} disabled={isSaving}>
+                      <SelectTrigger className="w-56">
+                        <SelectValue placeholder="Transisi" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Tanpa transisi</SelectItem>
+                        {availableTransitions
+                          .filter((transition) => transition.kind === "builtin" || transition.kind === "file")
+                          .map((transition) => {
+                            const isBuiltin = transition.kind === "builtin";
+                            return (
+                              <SelectItem
+                                key={`${isBuiltin ? "xfade" : "file"}:${transition.name}`}
+                                value={`${isBuiltin ? "xfade" : "file"}:${transition.name}`}
+                              >
+                                {transition.display_name || transition.name}
+                                {isBuiltin ? "" : " (file)"}
+                              </SelectItem>
+                            );
+                          })}
+                      </SelectContent>
+                    </Select>
                     <Button variant="outline" onClick={handleMerge} disabled={isSaving}>
                       Merge Selected ({mergeSelection.length})
                     </Button>

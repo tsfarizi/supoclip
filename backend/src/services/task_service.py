@@ -32,6 +32,8 @@ from ..clip_editor import (
     overlay_custom_captions,
 )
 from ..video_utils import VALID_OUTPUT_FORMATS, parse_timestamp_to_seconds
+from ..transition_spec import normalize_transition_spec
+from ..transition_engine import apply_transitions_between_clips
 from ..clip_cleanup import normalize_clip_cleanup_settings
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
 from ..clip_source_map import (
@@ -895,7 +897,13 @@ class TaskService:
         await self.clip_repo.reorder_task_clips(self.db, task_id)
         return {"message": "Clip split successfully"}
 
-    async def merge_clips(self, task_id: str, clip_ids: list[str]) -> Dict[str, Any]:
+    async def merge_clips(
+        self,
+        task_id: str,
+        clip_ids: list[str],
+        transition: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Merge multiple clips into one, optionally rendering inter-clip transitions."""
         if len(clip_ids) < 2:
             raise ValueError("At least two clips are required to merge")
 
@@ -907,10 +915,30 @@ class TaskService:
             clips.append(clip)
 
         ordered = sorted(clips, key=lambda c: c.get("clip_order", 0))
-        merged_path = merge_clip_files(
-            [Path(c["file_path"]) for c in ordered],
-            Path(self.config.temp_dir) / "clips",
-        )
+        paths = [Path(c["file_path"]) for c in ordered]
+
+        spec = normalize_transition_spec(transition or "")
+        if spec != "none" and len(paths) >= 2:
+            try:
+                merged_path = apply_transitions_between_clips(
+                    paths, spec, Path(self.config.temp_dir) / "clips"
+                )
+            except (RuntimeError, ValueError) as e:
+                logger.warning(
+                    "Transition render failed for task %s spec %s: %s; falling back to hard concat",
+                    task_id,
+                    spec,
+                    e,
+                )
+                merged_path = merge_clip_files(
+                    paths,
+                    Path(self.config.temp_dir) / "clips",
+                )
+        else:
+            merged_path = merge_clip_files(
+                paths,
+                Path(self.config.temp_dir) / "clips",
+            )
 
         merged_ranges = []
         for clip in ordered:

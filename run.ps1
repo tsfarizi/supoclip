@@ -1,13 +1,16 @@
 #requires -Version 5.1
 <#
   SupoClip native stack launcher - one command to run every application:
-  worker (arq), API (FastAPI), frontend (Next.js), optional MCP server,
-  and optional native ASR service. PostgreSQL and Redis must be reachable;
-  this script auto-bootstraps both when they are missing.
+  worker (arq), API (FastAPI), frontend (Next.js production server via
+  `next start`, built with `next build`), optional MCP server, and optional
+  native ASR service. PostgreSQL and Redis must be reachable; this script
+  auto-bootstraps both when they are missing.
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipDeps,      # skip dependency install steps (uv sync / pnpm install)
+    [switch]$SkipBuild,     # skip frontend production build (start existing .next)
+    [switch]$Rebuild,       # force frontend production rebuild
     [switch]$SkipWorker,
     [switch]$SkipFrontend,
     [switch]$IncludeMcp,
@@ -47,7 +50,9 @@ if (Test-Path (Join-Path $protoBin 'proto.exe')) {
 }
 if (-not $SkipDeps) {
     Write-Step "Ensuring pinned toolchain (node/pnpm/python/deno/uv from .prototools)"
-    & proto install 2>&1 | Out-Null
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & proto install 2>&1 | Out-Null } finally { $ErrorActionPreference = $prevEap }
 }
 
 # --- 2. load root .env into process env ------------------------------------
@@ -128,7 +133,9 @@ if (-not $dbOk) {
     $env:PGPASSWORD = $adminPass
     Invoke-Psql 'postgres' 'postgres' "CREATE ROLE supoclip LOGIN PASSWORD 'supoclip_password';"
     Invoke-Psql 'postgres' 'postgres' "CREATE DATABASE supoclip OWNER supoclip;"
-    & $psql -U postgres -h localhost -p 5433 -d supoclip -v ON_ERROR_STOP=1 -f (Join-Path $repo 'init.sql') 2>&1 | Out-Null
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $psql -U postgres -h localhost -p 5433 -d supoclip -v ON_ERROR_STOP=1 -f (Join-Path $repo 'init.sql') 2>&1 | Out-Null } finally { $ErrorActionPreference = $prevEap }
     if ($LASTEXITCODE -ne 0) { Write-Fail "init.sql failed; check PostgreSQL admin credentials (POSTGRES_ADMIN_PASSWORD)."; exit 1 }
     $ownSql = "ALTER TABLE users OWNER TO supoclip; ALTER TABLE sources OWNER TO supoclip; ALTER TABLE tasks OWNER TO supoclip; ALTER TABLE generated_clips OWNER TO supoclip; ALTER TABLE processing_cache OWNER TO supoclip; ALTER TABLE session OWNER TO supoclip; ALTER TABLE account OWNER TO supoclip; ALTER TABLE verification OWNER TO supoclip; ALTER TABLE stripe_webhook_events OWNER TO supoclip; ALTER TABLE revenuecat_webhook_events OWNER TO supoclip; ALTER TABLE app_settings OWNER TO supoclip; ALTER TABLE api_keys OWNER TO supoclip;"
     Invoke-Psql 'postgres' 'supoclip' $ownSql
@@ -145,17 +152,23 @@ if (-not $SkipDeps) {
     if (-not (Test-Path (Join-Path $repo 'backend\.venv\Scripts\python.exe'))) {
         Write-Step "uv sync (backend)"
         Push-Location (Join-Path $repo 'backend')
-        try { & uv sync 2>&1 | Select-Object -Last 3 } finally { Pop-Location }
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & uv sync 2>&1 | Select-Object -Last 3 } finally { $ErrorActionPreference = $prevEap; Pop-Location }
     } else { Write-Ok "backend/.venv exists" }
     if (-not (Test-Path (Join-Path $repo 'frontend\node_modules'))) {
         Write-Step "pnpm install + prisma generate (frontend)"
         Push-Location (Join-Path $repo 'frontend')
-        try { & pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 3; & pnpm exec prisma generate 2>&1 | Out-Null } finally { Pop-Location }
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 3; & pnpm exec prisma generate 2>&1 | Out-Null } finally { $ErrorActionPreference = $prevEap; Pop-Location }
     } else { Write-Ok "frontend/node_modules exists" }
     if ($IncludeMcp -and -not (Test-Path (Join-Path $repo 'mcp\.venv\Scripts\supoclip-mcp.exe'))) {
         Write-Step "uv sync (mcp)"
         Push-Location (Join-Path $repo 'mcp')
-        try { & uv sync 2>&1 | Select-Object -Last 3 } finally { Pop-Location }
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & uv sync 2>&1 | Select-Object -Last 3 } finally { $ErrorActionPreference = $prevEap; Pop-Location }
     }
 }
 
@@ -188,14 +201,43 @@ if (-not (Port-Listening 8000)) {
     Start-Bg 'backend' $venvPy @('-m','uvicorn','src.main_refactored:app','--host','127.0.0.1','--port','8000') (Join-Path $repo 'backend')
 } else { Write-Ok "backend already listening on 8000" }
 
-# Frontend
+# Frontend (production server)
 if (-not $SkipFrontend -and -not (Port-Listening 3107)) {
     # Prisma rejects the asyncpg driver prefix; derive a plain postgresql://
     # URL for the frontend process only (backend/worker keep the asyncpg URL).
     $prismaDbUrl = $env:DATABASE_URL -replace '^postgresql\+asyncpg://', 'postgresql://'
     $savedDbUrl = $env:DATABASE_URL
     $env:DATABASE_URL = $prismaDbUrl
-    Start-Bg 'frontend' 'cmd.exe' @('/c','pnpm exec next dev --turbopack --port 3107') (Join-Path $repo 'frontend')
+
+    # Production build: build when missing, or when -Rebuild forces it.
+    # Use -SkipBuild to start the existing .next without rebuilding.
+    $buildIdPath = Join-Path $repo 'frontend\.next\BUILD_ID'
+    if ($Rebuild -or -not (Test-Path $buildIdPath)) {
+        if ($SkipBuild) {
+            Write-Fail "-SkipBuild given but no production build at frontend\.next - run without -SkipBuild (or with -Rebuild) first."
+            exit 1
+        }
+        Write-Step "Building frontend (next build)"
+        Push-Location (Join-Path $repo 'frontend')
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $buildOut = & pnpm build 2>&1
+            $buildExit = $LASTEXITCODE
+            $buildOut | Select-Object -Last 15
+            if ($buildExit -ne 0) { throw "next build failed (exit $buildExit)" }
+        } finally {
+            $ErrorActionPreference = $prevEap
+            Pop-Location
+        }
+        Write-Ok "frontend build complete"
+    } elseif ($SkipBuild) {
+        Write-Ok "frontend build skipped (-SkipBuild)"
+    } else {
+        Write-Ok "frontend production build present (use -Rebuild to force a rebuild)"
+    }
+
+    Start-Bg 'frontend' 'cmd.exe' @('/c','pnpm exec next start --port 3107') (Join-Path $repo 'frontend')
     $env:DATABASE_URL = $savedDbUrl
 } elseif (-not (Port-Listening 3107)) { Write-Ok "frontend skipped (-SkipFrontend)" }
 else { Write-Ok "frontend already listening on 3107" }
@@ -251,7 +293,7 @@ if ($health) { Write-Ok "API /health -> $($health.status)" }
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host "  SupoClip native stack is running" -ForegroundColor Green
-Write-Host "  Frontend : http://localhost:3107" -ForegroundColor Green
+Write-Host "  Frontend : http://localhost:3107  (production)" -ForegroundColor Green
 Write-Host "  API      : http://localhost:8000  (docs: /docs)" -ForegroundColor Green
 Write-Host "  Redis    : localhost:6379" -ForegroundColor Green
 Write-Host "  Postgres : localhost:5433 (db: supoclip)" -ForegroundColor Green

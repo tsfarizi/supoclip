@@ -5,11 +5,16 @@ Media API routes (fonts, transitions, uploads).
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Optional, cast
 import logging
+import os
+import re
+import shutil
+import subprocess
 import uuid
 import aiofiles
 
+from ...admin_auth import require_admin_user
 from ...config import get_config
 from ...database import get_db
 from ...auth_headers import resolve_authenticated_user_id
@@ -31,6 +36,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["media"])
 MAX_VIDEO_UPLOAD_BYTES = 1_000_000_000
 MAX_FONT_UPLOAD_BYTES = 10 * 1024 * 1024
+
+_BUNDLED_TRANSITIONS_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "transitions"
+)
+_TRANSITION_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
+_FFMPEG_BIN_DIR = Path(
+    r"C:\Users\teuku\AppData\Local\Programs\ffmpeg\ffmpeg-9.0-essentials_build\bin"
+)
 
 
 async def _get_authenticated_user_id(request: Request, db: AsyncSession) -> str:
@@ -64,6 +77,104 @@ async def _write_upload_to_disk(
         if target_path.exists():
             target_path.unlink(missing_ok=True)
         raise
+
+
+def _transitions_dir() -> Path:
+    """Absolute path to the bundled transition MP4 directory."""
+    try:
+        from ...transition_spec import transitions_dir
+
+        return transitions_dir()
+    except Exception as exc:
+        logger.warning(
+            "transition_spec unavailable (%s); using bundled transitions directory fallback",
+            exc,
+        )
+        return _BUNDLED_TRANSITIONS_DIR
+
+
+def _builtin_transition_names() -> list[str]:
+    """Return built-in xfade transition names, or an empty list when unavailable."""
+    try:
+        from ...transition_spec import builtin_transition_names
+
+        return builtin_transition_names()
+    except Exception as exc:
+        logger.warning(
+            "transition_spec unavailable (%s); builtin transitions are not listed", exc
+        )
+        return []
+
+
+def _transition_limits() -> tuple[float, int]:
+    """Return (max duration seconds, max file MB) for uploaded transitions."""
+    try:
+        from ...transition_spec import (
+            MAX_TRANSITION_FILE_SECONDS,
+            MAX_TRANSITION_FILE_MB,
+        )
+
+        return MAX_TRANSITION_FILE_SECONDS, MAX_TRANSITION_FILE_MB
+    except Exception as exc:
+        logger.warning(
+            "transition_spec unavailable (%s); using default transition limits", exc
+        )
+        return 1.5, 20
+
+
+def _title_case_display_name(name: str) -> str:
+    """Convert a transition stem/name into a display title."""
+    return name.replace("_", " ").replace("-", " ").title()
+
+
+def _ffprobe_executable() -> Optional[str]:
+    """Locate an ffprobe executable (bundled install first, then PATH)."""
+    bundled = _FFMPEG_BIN_DIR / "ffprobe.exe"
+    if bundled.is_file():
+        return str(bundled)
+    return shutil.which("ffprobe")
+
+
+def _subprocess_env() -> dict[str, str]:
+    """Environment with the bundled ffmpeg bin directory on PATH."""
+    env = dict(os.environ)
+    env["PATH"] = str(_FFMPEG_BIN_DIR) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _probe_transition_duration(file_path: Path) -> Optional[float]:
+    """Return the media duration in seconds, or None when it cannot be validated."""
+    ffprobe = _ffprobe_executable()
+    if ffprobe is None:
+        logger.warning("ffprobe not found; skipping duration validation for %s", file_path)
+        return None
+
+    command = [
+        ffprobe,
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        str(file_path),
+    ]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=30, env=_subprocess_env()
+        )
+    except Exception as exc:
+        logger.error("ffprobe failed to run for %s: %s", file_path, exc)
+        return None
+
+    if result.returncode != 0:
+        logger.error("ffprobe rejected %s: %s", file_path, result.stderr.strip())
+        return None
+
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        logger.error(
+            "ffprobe returned unparsable duration for %s: %r", file_path, result.stdout
+        )
+        return None
 
 
 @router.get("/fonts")
@@ -210,33 +321,128 @@ async def delete_font(
 
 @router.get("/transitions")
 async def get_available_transitions():
-    """Get list of available transition effects."""
+    """Get the list of available transition effects (builtin xfade + custom files)."""
     try:
-        from ...video_utils import get_available_transitions
+        transition_info = [
+            {
+                "name": name,
+                "display_name": _title_case_display_name(name),
+                "kind": "builtin",
+                "file_path": None,
+            }
+            for name in _builtin_transition_names()
+        ]
 
-        transitions = get_available_transitions()
+        transitions_dir = _transitions_dir()
+        if transitions_dir.is_dir():
+            for transition_path in sorted(transitions_dir.glob("*.mp4")):
+                transition_info.append(
+                    {
+                        "name": transition_path.stem,
+                        "display_name": _title_case_display_name(transition_path.stem),
+                        "kind": "file",
+                        "file_path": str(transition_path),
+                    }
+                )
 
-        transition_info = []
-        for transition_path in transitions:
-            transition_file = Path(transition_path)
-            transition_info.append(
-                {
-                    "name": transition_file.stem,
-                    "display_name": transition_file.stem.replace("_", " ")
-                    .replace("-", " ")
-                    .title(),
-                    "file_path": transition_path,
-                }
-            )
-
-        logger.info(f"Found {len(transition_info)} available transitions")
+        logger.info("Found %d available transitions", len(transition_info))
         return {"transitions": transition_info}
 
     except Exception as e:
-        logger.error(f"Error retrieving transitions: {str(e)}")
+        logger.error("Error retrieving transitions: %s", e)
         raise HTTPException(
             status_code=500, detail=f"Error retrieving transitions: {str(e)}"
         )
+
+
+@router.get("/transitions/{name}/file")
+async def get_transition_file(name: str):
+    """Serve a custom transition MP4 file by its safe stem name."""
+    if not _TRANSITION_NAME_RE.match(name):
+        raise HTTPException(status_code=404, detail="Transition not found")
+
+    transition_path = _transitions_dir() / f"{name}.mp4"
+    if not transition_path.is_file():
+        raise HTTPException(status_code=404, detail="Transition not found")
+
+    return FileResponse(
+        path=str(transition_path),
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": "public, max-age=31536000",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@router.post("/transitions/upload")
+async def upload_transition(
+    request: Request,
+    uploaded_file: UploadFile = File(..., alias="file"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a custom transition MP4 (admin only) into the transitions directory."""
+    await require_admin_user(request, db, get_config())
+
+    if not uploaded_file.filename:
+        raise HTTPException(status_code=400, detail="Missing file name")
+
+    uploaded_filename = uploaded_file.filename or "transition.mp4"
+    if Path(uploaded_filename).suffix.lower() != ".mp4":
+        raise HTTPException(
+            status_code=400, detail="Only .mp4 transition files are supported"
+        )
+
+    slug = re.sub(r"[^a-z0-9_-]", "", Path(uploaded_filename).stem.lower())
+    if not slug:
+        raise HTTPException(status_code=400, detail="Invalid transition file name")
+
+    max_transition_seconds, max_transition_mb = _transition_limits()
+    max_transition_bytes = max_transition_mb * 1024 * 1024
+
+    config = get_config()
+    upload_temp_dir = Path(config.temp_dir) / "transition_uploads"
+    upload_temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = upload_temp_dir / f"{uuid.uuid4().hex}.mp4"
+
+    try:
+        await _write_upload_to_disk(uploaded_file, temp_path, max_transition_bytes)
+
+        duration = _probe_transition_duration(temp_path)
+        if duration is None:
+            raise HTTPException(
+                status_code=400, detail="Invalid or unreadable MP4 transition file"
+            )
+        if duration > max_transition_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Transition duration {duration:.2f}s exceeds the "
+                    f"{max_transition_seconds}s limit"
+                ),
+            )
+
+        target_path = _transitions_dir() / f"{slug}.mp4"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temp_path, target_path)
+
+        logger.info("Uploaded transition %s (%.2fs)", target_path.name, duration)
+        return {
+            "transition": {
+                "name": slug,
+                "display_name": slug.title(),
+                "kind": "file",
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error uploading transition: %s", e)
+        raise HTTPException(
+            status_code=500, detail=f"Error uploading transition: {str(e)}"
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 @router.get("/caption-templates")

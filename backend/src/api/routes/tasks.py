@@ -752,10 +752,15 @@ async def merge_clips(
         clip_ids = payload.get("clip_ids") or []
         if not isinstance(clip_ids, list):
             raise HTTPException(status_code=400, detail="clip_ids must be an array")
+        transition = payload.get("transition")
+        if not isinstance(transition, str):
+            transition = None
 
         task_service = TaskService(db)
         await _require_task_owner(request, task_service, db, task_id)
-        result = await task_service.merge_clips(task_id, clip_ids)
+        result = await task_service.merge_clips(
+            task_id, clip_ids, transition=transition
+        )
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
