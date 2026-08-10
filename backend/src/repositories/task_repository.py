@@ -343,6 +343,7 @@ class TaskRepository:
         result = await db.execute(
             text("""
                 SELECT t.*, s.title as source_title, s.type as source_type,
+                       s.url as source_url,
                        (SELECT COUNT(*) FROM generated_clips WHERE task_id = t.id) as clips_count
                 FROM tasks t
                 LEFT JOIN sources s ON t.source_id = s.id
@@ -362,6 +363,7 @@ class TaskRepository:
                     "source_id": row.source_id,
                     "source_title": row.source_title,
                     "source_type": row.source_type,
+                    "source_url": getattr(row, "source_url", None),
                     "status": row.status,
                     "processing_mode": getattr(row, "processing_mode", "fast"),
                     "completion_notification_sent_at": getattr(
@@ -374,6 +376,29 @@ class TaskRepository:
             )
 
         return tasks
+
+    @staticmethod
+    async def get_active_tasks_with_sources(
+        db: AsyncSession,
+    ) -> List[Dict[str, Any]]:
+        """All tasks still being processed, with their source URL.
+
+        Used to reject duplicate submissions: the same video (YouTube id or
+        uploaded file) must not run through the pipeline twice at once.
+        """
+        result = await db.execute(
+            text("""
+                SELECT t.id, t.user_id, COALESCE(s.url, '') AS source_url
+                FROM tasks t
+                LEFT JOIN sources s ON t.source_id = s.id
+                WHERE t.status NOT IN ('completed', 'error', 'cancelled', 'deleted')
+                ORDER BY t.created_at ASC
+            """)
+        )
+        return [
+            {"id": row.id, "user_id": row.user_id, "source_url": row.source_url or ""}
+            for row in result.fetchall()
+        ]
 
     @staticmethod
     async def enable_sharing(

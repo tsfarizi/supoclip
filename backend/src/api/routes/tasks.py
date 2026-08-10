@@ -256,6 +256,20 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
 
         task_service = TaskService(db)
 
+        # Reject duplicate submissions: if the same video (YouTube id or
+        # uploaded file) is already being processed, block the new task.
+        existing_task = await task_service.find_active_task_for_source(
+            raw_source["url"]
+        )
+        if existing_task:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Video ini sedang diproses (task {existing_task['id']} masih berjalan). "
+                    "Tunggu hingga selesai sebelum memproses video yang sama lagi."
+                ),
+            )
+
         # Create task
         task_id = await task_service.create_task_with_source(
             user_id=user_id,
@@ -317,6 +331,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
 
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except BillingLimitExceeded as e:
         raise HTTPException(
             status_code=402,
@@ -476,10 +492,16 @@ async def unshare_task(
 
 
 @router.get("/{task_id}/progress")
-async def get_task_progress_sse(task_id: str, request: Request):
+async def get_task_progress_sse(
+    task_id: str, request: Request, mode: str = "task"
+):
     """
     SSE endpoint for real-time progress updates.
     Streams progress updates as Server-Sent Events.
+
+    mode=edit keeps the stream open for completed tasks so clip re-render
+    progress (caption edits) can be delivered to the editor page; the default
+    task mode closes as soon as the main pipeline finishes.
     """
 
     async with AsyncSessionLocal() as local_db:
@@ -492,6 +514,8 @@ async def get_task_progress_sse(task_id: str, request: Request):
 
     if task.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Not authorized for this task")
+
+    edit_mode = mode == "edit"
 
     async def event_generator():
         """Generate SSE events for task progress."""
@@ -509,7 +533,7 @@ async def get_task_progress_sse(task_id: str, request: Request):
         }
 
         # If task is already completed or error, close connection
-        if task.get("status") in ["completed", "error"]:
+        if not edit_mode and task.get("status") in ["completed", "error"]:
             yield {"event": "close", "data": json.dumps({"status": task.get("status")})}
             return
 
@@ -530,8 +554,8 @@ async def get_task_progress_sse(task_id: str, request: Request):
                 event_type = progress_data.get("event_type", "progress")
                 yield {"event": event_type, "data": json.dumps(progress_data)}
 
-                # Close connection if task is done
-                if progress_data.get("status") in ["completed", "error"]:
+                # Close connection if task is done (task mode only)
+                if not edit_mode and progress_data.get("status") in ["completed", "error"]:
                     yield {
                         "event": "close",
                         "data": json.dumps({"status": progress_data.get("status")}),

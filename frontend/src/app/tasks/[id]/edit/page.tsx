@@ -28,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Slider } from "@/components/ui/slider";
+import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 interface TaskDetails {
@@ -113,6 +114,7 @@ export default function TaskEditPage() {
   const [subtitleSize, setSubtitleSize] = useState(52);
   const [subtitleY, setSubtitleY] = useState(78);
   const [captionSaved, setCaptionSaved] = useState(false);
+  const [clipRenderProgress, setClipRenderProgress] = useState<Record<string, number | null>>({});
 
   const [volume, setVolume] = useState(100);
   const [isMuted, setIsMuted] = useState(false);
@@ -144,11 +146,6 @@ export default function TaskEditPage() {
     () => captionText.split(/\s+/).map((word) => word.trim()).filter(Boolean),
     [captionText]
   );
-
-  const activeSubtitleWords = useMemo(() => {
-    const start = Math.max(0, Math.floor((currentTime / Math.max(selectedClip?.duration || 1, 1)) * subtitleWords.length));
-    return subtitleWords.slice(start, start + 6);
-  }, [currentTime, selectedClip?.duration, subtitleWords]);
 
   const getSubtitleWordsAtTime = useCallback(
     (timeSeconds: number, durationSeconds: number) => {
@@ -245,6 +242,39 @@ export default function TaskEditPage() {
     video.muted = isMuted;
     video.playbackRate = playbackRate;
   }, [volume, isMuted, playbackRate]);
+
+  // Live progress for clip re-renders (caption edits). mode=edit keeps the
+  // stream open for completed tasks so clip_render events arrive here.
+  useEffect(() => {
+    if (!params.id) return;
+    const eventSource = new EventSource(`${taskApiUrl}/${params.id}/progress?mode=edit`);
+
+    eventSource.addEventListener("clip_render", (e) => {
+      const data = JSON.parse(e.data) as {
+        clip_id?: string;
+        progress?: number;
+      };
+      const clipId = data.clip_id;
+      if (!clipId) return;
+      const progress = Number(data.progress ?? 0);
+      setClipRenderProgress((current) => ({ ...current, [clipId]: progress }));
+      if (progress >= 100) {
+        window.setTimeout(() => {
+          setClipRenderProgress((current) => {
+            const next = { ...current };
+            delete next[clipId];
+            return next;
+          });
+        }, 1500);
+      }
+    });
+
+    eventSource.addEventListener("error", () => {
+      // EventSource reconnects automatically; transient errors are harmless.
+    });
+
+    return () => eventSource.close();
+  }, [params.id, taskApiUrl]);
 
   const withSaving = async (action: () => Promise<void>) => {
     setIsSaving(true);
@@ -653,7 +683,7 @@ export default function TaskEditPage() {
                 <CardContent className="p-4 lg:p-5 space-y-4">
                   {selectedClip ? (
                     <>
-                      <div className="rounded-xl bg-black overflow-hidden relative">
+                      <div className="rounded-xl bg-black overflow-hidden relative flex items-center justify-center">
                         <video
                           ref={videoRef}
                           key={selectedClip.id}
@@ -662,32 +692,23 @@ export default function TaskEditPage() {
                           onTimeUpdate={handleTimeUpdate}
                           onPlay={() => setIsPlaying(true)}
                           onPause={() => setIsPlaying(false)}
-                          className="w-full max-h-[520px] object-contain"
+                          className="max-h-[600px] max-w-full h-auto w-auto object-contain"
                           style={videoStyle}
                         />
-
-                        <div
-                          className="absolute left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full bg-black/70 text-white text-center pointer-events-none"
-                          style={{
-                            bottom: `${subtitleY}%`,
-                            fontSize: `${subtitleSize / 2.5}px`,
-                          }}
-                        >
-                          {activeSubtitleWords.length > 0 ? (
-                            activeSubtitleWords.map((word, index) => {
-                              const cleaned = word.toLowerCase().replace(/[^a-z0-9']/g, "");
-                              const highlighted = highlightWords.includes(cleaned);
-                              return (
-                                <span key={`${word}-${index}`} className={highlighted ? "text-yellow-300" : "text-white"}>
-                                  {word}{index === activeSubtitleWords.length - 1 ? "" : " "}
-                                </span>
-                              );
-                            })
-                          ) : (
-                            <span>Subtitle preview</span>
-                          )}
-                        </div>
                       </div>
+
+                      {selectedClip && clipRenderProgress[selectedClip.id] != null && (
+                        <div className="space-y-1.5 rounded-lg border border-blue-200 bg-blue-50 p-3">
+                          <div className="flex items-center justify-between text-xs text-blue-700">
+                            <span className="font-medium flex items-center gap-1.5">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              Rendering captions...
+                            </span>
+                            <span>{clipRenderProgress[selectedClip.id]}%</span>
+                          </div>
+                          <Progress value={clipRenderProgress[selectedClip.id] ?? 0} className="h-2" />
+                        </div>
+                      )}
 
                       <div className="border rounded-lg p-3 space-y-3">
                         <div className="flex items-center justify-between text-sm text-gray-600">
@@ -978,6 +999,18 @@ export default function TaskEditPage() {
                             Merge
                           </label>
                         </div>
+                        {clipRenderProgress[clip.id] != null && (
+                          <div className="mt-2 space-y-1">
+                            <div className="flex items-center justify-between text-[10px] text-blue-600">
+                              <span className="font-medium flex items-center gap-1">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Rendering captions
+                              </span>
+                              <span>{clipRenderProgress[clip.id]}%</span>
+                            </div>
+                            <Progress value={clipRenderProgress[clip.id] ?? 0} className="h-1.5" />
+                          </div>
+                        )}
                       </button>
                     );
                   })}

@@ -9,9 +9,11 @@ from datetime import datetime
 from pathlib import Path
 import json
 import hashlib
+import re
 from time import perf_counter
 
 import redis.asyncio as redis
+import redis as sync_redis
 
 from ..repositories.task_repository import TaskRepository
 from ..repositories.source_repository import SourceRepository
@@ -41,8 +43,27 @@ from ..clip_source_map import (
     total_source_duration,
     trim_source_ranges,
 )
+from ..utils.async_helpers import run_in_thread
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_video_identity(url: str) -> str:
+    """Canonical identity used to detect duplicate in-flight submissions.
+
+    YouTube links that point at the same video (youtu.be vs watch?v=, with or
+    without tracking params) collapse to the same identity; everything else is
+    compared verbatim (upload paths).
+    """
+    url = (url or "").strip()
+    if not url:
+        return ""
+    match = re.search(
+        r"(?:youtu\.be/|youtube\.com/watch\?v=)([A-Za-z0-9_-]{6,})", url
+    )
+    if match:
+        return f"youtube:{match.group(1)}"
+    return url
 
 
 class TaskService:
@@ -137,6 +158,19 @@ class TaskService:
 
         logger.info(f"Created task {task_id} for user {user_id}")
         return task_id
+
+    async def find_active_task_for_source(
+        self, url: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return an in-flight task processing the same video, if any."""
+        identity = normalize_video_identity(url)
+        if not identity:
+            return None
+        active_tasks = await self.task_repo.get_active_tasks_with_sources(self.db)
+        for task in active_tasks:
+            if normalize_video_identity(task.get("source_url") or "") == identity:
+                return task
+        return None
 
     async def process_task(
         self,
@@ -958,22 +992,85 @@ class TaskService:
                 except ValueError:
                     transcript_video_path = None
 
-        output_path = overlay_custom_captions(
-            input_path,
-            Path(self.config.temp_dir) / "clips",
-            caption_text,
-            position,
-            highlight_words,
-            font_family=task.get("font_family") or None,
-            font_size=task.get("font_size") or None,
-            font_color=task.get("font_color") or None,
-            caption_template=task.get("caption_template") or "default",
-            transcript_video_path=transcript_video_path,
-            source_ranges=self._get_clip_source_ranges(clip),
-            output_format=task.get("output_format") or "vertical",
-            hook_title=clip.get("hook_title"),
+        render_redis = sync_redis.Redis(
+            host=self.config.redis_host,
+            port=self.config.redis_port,
+            password=self.config.redis_password,
+            decode_responses=True,
         )
-        copy_clip_source_ranges(input_path, output_path)
+
+        # Serialize re-renders per clip: concurrent caption edits on the same
+        # clip used to race (both writing the DB, last-commit-wins) which could
+        # leave the clip row pointing at a file that was never persisted.
+        lock_key = f"clip_render_lock:{clip_id}"
+        lock_acquired = render_redis.set(lock_key, "1", nx=True, ex=600)
+        if not lock_acquired:
+            raise ValueError(
+                "Clip sedang di-render ulang. Tunggu hingga render selesai sebelum menyimpan perubahan caption."
+            )
+
+        def publish_render_progress(progress: int, message: str) -> None:
+            try:
+                render_redis.publish(
+                    f"progress:{task_id}",
+                    json.dumps(
+                        {
+                            "task_id": task_id,
+                            "clip_id": clip_id,
+                            "event_type": "clip_render",
+                            "progress": progress,
+                            "message": message,
+                            "status": "processing",
+                        }
+                    ),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to publish clip render progress for %s", clip_id, exc_info=True
+                )
+
+        try:
+            output_path = await run_in_thread(
+                overlay_custom_captions,
+                input_path,
+                Path(self.config.temp_dir) / "clips",
+                caption_text,
+                position,
+                highlight_words,
+                font_family=task.get("font_family") or None,
+                font_size=task.get("font_size") or None,
+                font_color=task.get("font_color") or None,
+                caption_template=task.get("caption_template") or "default",
+                transcript_video_path=transcript_video_path,
+                source_ranges=self._get_clip_source_ranges(clip),
+                output_format=task.get("output_format") or "vertical",
+                hook_title=clip.get("hook_title"),
+                progress_callback=publish_render_progress,
+            )
+            if not output_path.exists():
+                raise RuntimeError("Re-render failed: output clip file was not created")
+            # Carry the source-range mapping to the new file first, then drop the
+            # superseded clip file once the new one exists.
+            copy_clip_source_ranges(input_path, output_path)
+            if (
+                input_path.exists()
+                and input_path.resolve() != output_path.resolve()
+            ):
+                try:
+                    input_path.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug(
+                        "Could not remove superseded clip file %s", input_path, exc_info=True
+                    )
+        finally:
+            try:
+                render_redis.delete(lock_key)
+            except Exception:
+                pass
+            try:
+                render_redis.close()
+            except Exception:
+                pass
 
         await self.clip_repo.update_clip(
             self.db,

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 import subprocess
 import tempfile
 import uuid
@@ -263,7 +263,12 @@ def overlay_custom_captions(
     source_ranges: Optional[List[tuple[float, float]]] = None,
     output_format: str = "vertical",
     hook_title: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Path:
+    def _report(progress: int, message: str) -> None:
+        if progress_callback:
+            progress_callback(progress, message)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / _safe_name("caption")
     words = [word for word in caption_text.split() if word.strip()]
@@ -277,6 +282,7 @@ def overlay_custom_captions(
         clean_path = output_dir / _safe_name("clean")
         start_seconds = source_ranges[0][0]
         end_seconds = source_ranges[-1][1]
+        _report(10, "Rendering clean clip from source...")
         rendered_clean = create_optimized_clip(
             transcript_video_path,
             start_seconds,
@@ -293,9 +299,13 @@ def overlay_custom_captions(
         )
         if rendered_clean:
             base_input = clean_path
+        _report(80, "Burning edited captions...")
+    else:
+        _report(30, "Burning edited captions...")
 
     if not words:
         _run(["ffmpeg", "-y", "-i", str(base_input), *_encode_args(), str(output_path)])
+        _report(100, "Done")
         return output_path
 
     width, height = _ffprobe_size(base_input)
@@ -359,6 +369,7 @@ def overlay_custom_captions(
         if base_input != input_path and base_input.exists():
             base_input.unlink(missing_ok=True)
 
+    _report(100, "Done")
     return output_path
 
 

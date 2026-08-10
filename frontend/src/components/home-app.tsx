@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -28,7 +28,31 @@ interface LatestTask {
   status: string;
   clips_count: number;
   created_at: string;
+  source_url?: string;
 }
+
+// Task statuses that mean the video is still being processed.
+const ACTIVE_TASK_STATUSES = [
+  "queued",
+  "pending",
+  "processing",
+  "downloading",
+  "transcribing",
+  "analyzing",
+  "generating_clips",
+];
+
+// Mirrors backend normalize_video_identity: YouTube links collapse to the
+// video id, everything else is compared verbatim.
+const normalizeVideoIdentity = (value: string): string => {
+  const v = (value || "").trim();
+  if (!v) return "";
+  const match = v.match(
+    /(?:youtu\.be\/|youtube\.com\/watch\?v=)([A-Za-z0-9_-]{6,})/
+  );
+  if (match) return `youtube:${match[1]}`;
+  return v;
+};
 
 interface BillingSummary {
   monetization_enabled: boolean;
@@ -223,6 +247,7 @@ export default function HomeApp() {
 
   // Latest task state
   const [latestTask, setLatestTask] = useState<LatestTask | null>(null);
+  const [tasks, setTasks] = useState<LatestTask[]>([]);
   const [isLoadingLatest, setIsLoadingLatest] = useState(false);
   const [billingSummary, setBillingSummary] = useState<BillingSummary | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -323,6 +348,7 @@ export default function HomeApp() {
 
         if (response.ok) {
           const data = await response.json();
+          setTasks(data.tasks || []);
           if (data.tasks && data.tasks.length > 0) {
             setLatestTask(data.tasks[0]); // Get the first (latest) task
           }
@@ -445,6 +471,40 @@ export default function HomeApp() {
     billingSummary?.reason || "Choose a paid plan to process videos.";
   const generationControlsDisabled = isLoading || generationRequiresUpgrade;
 
+  // Detect a task that is currently processing the SAME video so the user is
+  // warned and blocked from submitting a duplicate.
+  const activeTasks = useMemo(
+    () => tasks.filter((task) => ACTIVE_TASK_STATUSES.includes(task.status)),
+    [tasks]
+  );
+
+  const duplicateTask = useMemo(() => {
+    if (sourceType === "youtube") {
+      const identity = normalizeVideoIdentity(url);
+      if (!identity) return null;
+      return (
+        activeTasks.find(
+          (task) => normalizeVideoIdentity(task.source_url || "") === identity
+        ) ?? null
+      );
+    }
+    if (sourceType === "upload" && fileName) {
+      return (
+        activeTasks.find(
+          (task) =>
+            task.source_title === fileName ||
+            (task.source_url &&
+              task.source_url.toLowerCase().includes(fileName.toLowerCase()))
+        ) ?? null
+      );
+    }
+    return null;
+  }, [sourceType, url, fileName, activeTasks]);
+
+  const duplicateMessage = duplicateTask
+    ? `Video ini sedang diproses (task ${duplicateTask.id} masih berjalan). Tunggu hingga selesai sebelum memproses video yang sama lagi.`
+    : "";
+
   const handleSignOut = async () => {
     await signOut();
     window.location.href = "/sign-in";
@@ -475,6 +535,10 @@ export default function HomeApp() {
     if (!session?.user?.id) return;
     if (generationRequiresUpgrade) {
       setError(generationGateMessage);
+      return;
+    }
+    if (duplicateTask) {
+      setError(duplicateMessage);
       return;
     }
 
@@ -1387,6 +1451,17 @@ export default function HomeApp() {
                 </Alert>
               )}
 
+              {!error && duplicateTask && (
+                <Alert className="border-amber-200 bg-amber-50">
+                  <AlertCircle className="h-4 w-4 text-amber-600" />
+                  <AlertDescription className="text-sm text-amber-800">
+                    Video ini sedang diproses (task {duplicateTask.id} masih
+                    berjalan). Tunggu hingga selesai sebelum memproses ulang
+                    video yang sama.
+                  </AlertDescription>
+                </Alert>
+              )}
+
               <p className="text-xs text-stone-500">
                 Completion emails use your user preference in{" "}
                 <Link href="/settings" className="font-medium text-stone-700 underline underline-offset-2">
@@ -1401,10 +1476,17 @@ export default function HomeApp() {
                   (sourceType === "youtube" && !url.trim()) ||
                   (sourceType === "upload" && !fileRef.current) ||
                   generationRequiresUpgrade ||
+                  !!duplicateTask ||
                   isLoading
                 }
               >
-                {isLoading ? "Processing..." : generationRequiresUpgrade ? "Choose a Paid Plan" : "Process Video"}
+                {isLoading
+                  ? "Processing..."
+                  : generationRequiresUpgrade
+                    ? "Choose a Paid Plan"
+                    : duplicateTask
+                      ? "Video sedang diproses"
+                      : "Process Video"}
               </Button>
             </form>
           </div>
