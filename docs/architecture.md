@@ -114,12 +114,12 @@ Current top-level layout:
 
 - `backend/`
 - `frontend/`
-- `docker-compose.yml`
+- `.prototools`
 - `init.sql`
 - `.env.example`
-- `start.sh`
+- `run.ps1` / `stop.ps1`
 
-This repository snapshot does not currently include the separate `waitlist/` app referenced in older project guidance.
+The repository does not include the separate `waitlist/` app referenced in older project guidance.
 
 ## Backend Architecture
 
@@ -387,15 +387,13 @@ Stores reusable processing artifacts to avoid repeating expensive work when poss
 
 ## Storage Model
 
-In Docker, the system uses named volumes for:
+Natively, the stack shares one filesystem tree (`TEMP_DIR`, default `backend/data`):
 
 - uploads
 - clips
-- Redis data
-- PostgreSQL data
-- YouTube auth state
+- b-roll
 
-Fonts and transitions are file-based assets mounted from the repository.
+Redis data and PostgreSQL data live in their own services. Fonts and transitions are file-based assets from the repository.
 
 ## Operational Characteristics
 

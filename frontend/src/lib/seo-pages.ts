@@ -131,7 +131,7 @@ export const seoPages: SeoPage[] = [
         heading: "Why self-host a video clipping pipeline",
         paragraphs: [
           "Self-hosting is useful when a team needs control over deployment, provider choice, processing limits, or product customization. Instead of sending every workflow decision through a closed platform, the application can run alongside the rest of the team's infrastructure.",
-          "SupoClip includes a Next.js frontend, FastAPI backend, background workers, PostgreSQL, and Redis. The repository includes a Docker Compose setup so the complete application can be deployed as one stack.",
+          "SupoClip includes a Next.js frontend, FastAPI backend, background workers, PostgreSQL, and Redis. The repository ships with a one-command launcher so the complete application can run natively as one stack.",
         ],
       },
       {
@@ -148,9 +148,9 @@ export const seoPages: SeoPage[] = [
         ],
       },
       {
-        heading: "Start with Docker, customize when needed",
+        heading: "Start natively, customize when needed",
         paragraphs: [
-          "The quickest setup is to clone the repository, copy the environment template, add the required provider credentials, and start the stack with Docker Compose. Developers can then change the scoring logic, caption presets, interface, or deployment model as their workflow evolves.",
+          "The quickest setup is to clone the repository, copy the environment template, add the required provider credentials, and run the one-command launcher. Developers can then change the scoring logic, caption presets, interface, or deployment model as their workflow evolves.",
           "Creators who prefer not to operate infrastructure can use the hosted SupoClip application while keeping the open-source repository available as a migration path.",
         ],
       },
@@ -169,7 +169,7 @@ export const seoPages: SeoPage[] = [
       {
         question: "Does SupoClip require Docker?",
         answer:
-          "Docker Compose is the documented full-stack path. Developers can run the Next.js frontend, FastAPI API, worker, PostgreSQL, and Redis separately when their environment requires it.",
+          "No. The full stack runs natively through the repository's one-command launcher: PostgreSQL, Redis, the FastAPI API, the background worker, and the Next.js frontend. Docker is not required.",
       },
     ],
   },

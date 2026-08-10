@@ -14,32 +14,32 @@ Current repository structure:
   - Next.js app
   - App Router pages, API routes, auth, Prisma schema, UI components
 - Root files
-  - `docker-compose.yml`
+  - `.prototools`
   - `init.sql`
   - `.env.example`
-  - `start.sh`
+  - `run.ps1` / `stop.ps1`
 
 Note: older repo guidance references a `waitlist/` app, but it is not present in this checkout.
 
 ## Main Commands
 
-## Full stack with Docker
+## Full stack natively (no containers)
 
-```bash
-docker-compose up -d --build
-docker-compose logs -f
-docker-compose down
+```powershell
+proto install   # one-time: pinned toolchain
+.\run.ps1       # start worker, API, frontend (+ auto-bootstrap Postgres/Redis)
+.\stop.ps1      # stop everything
 ```
 
 ## Frontend
 
 ```bash
 cd frontend
-npm install
-npm run dev
-npm run build
-npm run start
-npm run lint
+pnpm install
+pnpm run dev
+pnpm run build
+pnpm run start
+pnpm run lint
 ```
 
 ## Backend
@@ -249,14 +249,13 @@ cd frontend && npm run test:e2e
 ### Local Test Environment
 
 - Start PostgreSQL and Redis locally before running integration or e2e flows.
-- `docker-compose up -d postgres redis` is enough for backend and frontend test runs.
-- `docker-compose up -d` is the simplest full-stack option when you also want manual smoke testing.
+- `.\run.ps1` starts both (plus the full stack) when you want manual smoke testing.
 
 Useful backend test env vars:
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://localhost:5432/supoclip
-TEST_DATABASE_URL=postgresql+asyncpg://localhost:5432/supoclip
+DATABASE_URL=postgresql+asyncpg://supoclip:supoclip_password@localhost:5433/supoclip
+TEST_DATABASE_URL=postgresql+asyncpg://supoclip:supoclip_password@localhost:5433/supoclip
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 BACKEND_AUTH_SECRET=supoclip_test_secret
@@ -283,12 +282,12 @@ Automated tests cover the main seams, but manual smoke testing is still useful f
 
 ## Helpful Logs
 
-```bash
-docker-compose logs -f backend
-docker-compose logs -f worker
-docker-compose logs -f frontend
-docker-compose logs -f postgres
-docker-compose logs -f redis
+Logs for every process live in `.local/logs/`:
+
+```text
+.local/logs/backend.*.log
+.local/logs/worker.*.log
+.local/logs/frontend.*.log
 ```
 
 ## Codebase Conventions

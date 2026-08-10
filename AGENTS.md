@@ -1,25 +1,36 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a monorepo with three apps:
+This repository is a monorepo with two apps:
 - `backend/`: FastAPI + async worker code (`src/api`, `src/services`, `src/repositories`, `src/workers`).
 - `frontend/`: main Next.js app (`src/app`, `src/components`, `src/lib`, `prisma/`).
-- `waitlist/`: separate Next.js marketing/waitlist app.
+- `mcp/`: standalone MCP server for programmatic access (`src/supoclip_mcp`).
+- `asr/`: optional self-hosted transcription service (Qwen3-ASR, GPU).
 
-Infra and bootstrap files live at the root: `docker-compose.yml`, `init.sql`, `.env.example`, and `start.sh`.
+Infra and bootstrap files live at the root: `.prototools`, `init.sql`, `.env.example`, `run.ps1`, and `stop.ps1`.
+
+## Toolchain (proto)
+All runtime toolchain versions are pinned in `.prototools` and managed by
+[proto](https://moonrepo.dev/docs/proto): `node`, `pnpm`, `python`, `deno`, `uv`.
+Bootstrap once with `proto install`, then run the full stack with `.\run.ps1`.
 
 ## Build, Test, and Development Commands
-Use Docker for full-stack development:
-- `docker-compose up -d --build`: start frontend, backend, worker, Postgres, and Redis.
-- `docker-compose logs -f`: stream service logs.
-- `docker-compose down`: stop everything.
+The stack is fully native (no containers). `run.ps1` starts everything:
+- `.\run.ps1`: start worker, backend API, and frontend (auto-bootstraps Redis,
+  PostgreSQL schema, and dependency installs).
+- `.\stop.ps1`: stop all SupoClip processes.
+- `.\run.ps1 -SkipDeps`: skip `uv sync` / `pnpm install` on re-runs.
+- `.\run.ps1 -IncludeMcp` / `-IncludeAsr`: also start the optional MCP/ASR services.
 
-Local app commands:
-- `cd frontend && npm run dev` (or `waitlist`): run Next.js in dev mode.
-- `cd frontend && npm run build && npm run start`: production build + serve.
-- `cd frontend && npm run lint` (same in `waitlist`): run ESLint.
-- `cd backend && uv sync && uvicorn src.main:app --reload --host 0.0.0.0 --port 8000`: run API locally.
-- `cd backend && .venv/bin/arq src.workers.tasks.WorkerSettings`: run the worker.
+Logs land in `.local/logs/`.
+
+Local app commands (manual):
+- `cd backend && uv sync && uv run uvicorn src.main_refactored:app --reload --host 0.0.0.0 --port 8000`: run API locally.
+- `cd backend && uv run arq src.workers.tasks.WorkerSettings`: run the worker.
+- `cd frontend && pnpm install && pnpm run dev`: run Next.js in dev mode (port 3107).
+- `cd frontend && pnpm run build && pnpm run start`: production build + serve.
+- `cd frontend && pnpm run lint`: run ESLint.
+- `cd mcp && uv run supoclip-mcp`: run the MCP server.
 
 ## Coding Style & Naming Conventions
 - Python: 4-space indentation, type hints where practical, `snake_case` for functions/modules.
@@ -29,8 +40,8 @@ Local app commands:
 
 ## Testing Guidelines
 There is no mature automated test suite yet. Treat linting plus manual verification as the current baseline:
-- Run `npm run lint` in both Next.js apps.
-- Smoke test core flows with `docker-compose` (create task, process clips, view task page).
+- Run `pnpm run lint` in the Next.js app.
+- Smoke test core flows with the native stack (create task, process clips, view task page).
 
 When adding tests, place them near code or under `tests/` with clear names (`test_*.py`, `*.test.ts[x]`).
 

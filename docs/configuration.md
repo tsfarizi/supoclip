@@ -2,20 +2,18 @@
 
 This guide explains the important environment variables used by SupoClip and how they affect behavior.
 
-Most settings are sourced from `.env.example`, `docker-compose.yml`, and the backend configuration code in `backend/src/config.py`.
+Most settings are sourced from `.env.example` and the backend configuration code in `backend/src/config.py`.
 
 ## Configuration Strategy
 
-There are three main layers:
+There are two main layers:
 
 - Root `.env`
-  - The main place to configure the app
-- `docker-compose.yml`
-  - Supplies environment variables into the running containers
+  - The main place to configure the app (loaded by `run.ps1` into every process)
 - Application defaults
   - Fallback values defined in the backend or frontend code
 
-In most cases, edit `.env` and then rebuild or restart the stack.
+In most cases, edit `.env` and then restart the stack (`.\stop.ps1; .\run.ps1`).
 
 ## Required Settings
 
@@ -45,7 +43,7 @@ The backend can infer a default LLM from whichever API key is present, but setti
 | `BETTER_AUTH_SECRET` | Dev secret | Frontend auth secret; must be changed in non-local environments |
 | `DISABLE_SIGN_UP` | `false` | Prevents creation of new user accounts when set |
 | `NEXT_PUBLIC_LANDING_ONLY_MODE` | `false` | Restricts the UI to the landing page only |
-| `TEMP_DIR` | `/app/uploads` in Docker | Temporary backend working directory for uploads and processing |
+| `TEMP_DIR` | `backend/data` | Temporary backend working directory for uploads, clips, and processing (shared by API and worker) |
 | `CORS_ORIGINS` | `http://localhost:3000,http://sp.localhost:3000` | Allowed browser origins for backend requests, including direct browser video uploads |
 
 ## Analytics Settings
@@ -107,12 +105,9 @@ Fonts and transitions are configured by mounted files rather than environment va
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `REDIS_HOST` | `redis` in Docker, `localhost` in code | Redis hostname |
+| `REDIS_HOST` | `localhost` | Redis hostname |
 | `REDIS_PORT` | `6379` | Redis port |
-| `DATABASE_URL` | injected by Docker | PostgreSQL connection string |
-| `POSTGRES_DB` | `supoclip` | PostgreSQL database name |
-| `POSTGRES_USER` | `supoclip` | PostgreSQL username |
-| `POSTGRES_PASSWORD` | `supoclip_password` | PostgreSQL password |
+| `DATABASE_URL` | `postgresql+asyncpg://supoclip:supoclip_password@localhost:5433/supoclip` | PostgreSQL connection string |
 
 ## Self-Host and Monetization Settings
 
@@ -194,7 +189,7 @@ Behavior notes:
 
 ## Frontend Runtime Variables
 
-These are especially relevant in Docker and deployments:
+These are especially relevant in deployments:
 
 | Variable | Purpose |
 |---|---|
@@ -212,18 +207,14 @@ These are especially relevant in Docker and deployments:
 When changing `.env`:
 
 1. Update the file.
-2. Rebuild if build-time frontend values changed:
+2. Restart the stack:
 
-```bash
-docker-compose up -d --build
+```powershell
+.\stop.ps1
+.\run.ps1
 ```
 
-3. Otherwise a restart is often enough:
-
-```bash
-docker-compose down
-docker-compose up -d
-```
+Frontend build-time values (`NEXT_PUBLIC_*`) are re-read by the dev server on restart.
 
 ## Recommended Minimal `.env`
 

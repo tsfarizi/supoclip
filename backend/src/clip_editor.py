@@ -15,6 +15,7 @@ from .caption_templates import get_template
 from .video_utils import (
     ass_fonts_dir,
     build_assemblyai_ass_subtitles,
+    create_optimized_clip,
     get_words_for_keep_ranges,
     get_words_in_range,
     load_cached_transcript_data,
@@ -139,8 +140,8 @@ def _escape_ass_text(value: str) -> str:
 def _escape_filter_path(path: Path) -> str:
     return (
         str(path)
-        .replace("\\", "\\\\")
-        .replace(":", "\\:")
+        .replace("\\", "/")
+        .replace(":", "\\\\:")
         .replace("'", "\\'")
         .replace(" ", "\\ ")
     )
@@ -260,16 +261,45 @@ def overlay_custom_captions(
     caption_template: str = "default",
     transcript_video_path: Optional[Path] = None,
     source_ranges: Optional[List[tuple[float, float]]] = None,
+    output_format: str = "vertical",
+    hook_title: Optional[str] = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / _safe_name("caption")
     words = [word for word in caption_text.split() if word.strip()]
+
+    # The clip file already has the ORIGINAL captions burned in. Overlaying the
+    # edited text onto it duplicates the text, so when the source video is
+    # available we first re-render a CLEAN segment (same reframe/crop pipeline,
+    # no subtitles) and burn the edited captions onto that instead.
+    base_input = input_path
+    if transcript_video_path is not None and source_ranges:
+        clean_path = output_dir / _safe_name("clean")
+        start_seconds = source_ranges[0][0]
+        end_seconds = source_ranges[-1][1]
+        rendered_clean = create_optimized_clip(
+            transcript_video_path,
+            start_seconds,
+            end_seconds,
+            clean_path,
+            add_subtitles=False,
+            font_family=font_family,
+            font_size=font_size,
+            font_color=font_color,
+            caption_template=caption_template,
+            output_format=output_format,
+            keep_ranges=source_ranges,
+            hook_title=hook_title,
+        )
+        if rendered_clean:
+            base_input = clean_path
+
     if not words:
-        _run(["ffmpeg", "-y", "-i", str(input_path), *_encode_args(), str(output_path)])
+        _run(["ffmpeg", "-y", "-i", str(base_input), *_encode_args(), str(output_path)])
         return output_path
 
-    width, height = _ffprobe_size(input_path)
-    duration = _ffprobe_duration(input_path)
+    width, height = _ffprobe_size(base_input)
+    duration = _ffprobe_duration(base_input)
     position_y = {
         "top": 0.18,
         "middle": 0.52,
@@ -277,7 +307,7 @@ def overlay_custom_captions(
     }.get(position, 0.78)
     ass_path = output_dir / f"captions_{uuid.uuid4().hex[:12]}.ass"
 
-    transcript_path = transcript_video_path or input_path
+    transcript_path = transcript_video_path or base_input
     transcript_data = load_cached_transcript_data(transcript_path)
     timed_words: List[Dict[str, Any]] = []
     if transcript_data and transcript_data.get("words"):
@@ -288,7 +318,7 @@ def overlay_custom_captions(
 
     caption_words = _caption_words_with_timings(words, timed_words, duration)
     if not build_assemblyai_ass_subtitles(
-        input_path,
+        base_input,
         clip_start=0.0,
         clip_end=duration,
         video_width=width,
@@ -317,7 +347,7 @@ def overlay_custom_captions(
                 "ffmpeg",
                 "-y",
                 "-i",
-                str(input_path),
+                str(base_input),
                 "-vf",
                 subtitle_filter,
                 *_encode_args(),
@@ -326,6 +356,8 @@ def overlay_custom_captions(
         )
     finally:
         ass_path.unlink(missing_ok=True)
+        if base_input != input_path and base_input.exists():
+            base_input.unlink(missing_ok=True)
 
     return output_path
 

@@ -51,7 +51,8 @@ SupoClip provides the same core functionality with more control:
 
 ### Prerequisites
 
-- Docker and Docker Compose
+- [proto](https://moonrepo.dev/docs/proto/install) installed
+- PostgreSQL installed and running (service)
 - An AssemblyAI API key (for transcription) - [Get one here](https://www.assemblyai.com/)
 - An LLM provider for AI analysis - OpenAI, Google, Anthropic, or Ollama
 
@@ -83,7 +84,7 @@ GOOGLE_API_KEY=your_google_api_key
 
 # Option D: Ollama (local/self-hosted)
 # LLM=ollama:gpt-oss:20b
-# OLLAMA_BASE_URL=  # Optional; defaults to localhost locally, host.docker.internal in Docker
+# OLLAMA_BASE_URL=http://localhost:11434/v1
 # OLLAMA_API_KEY=your_ollama_api_key  # Optional (Ollama Cloud)
 
 # Optional: Auth secret (change in production)
@@ -110,29 +111,28 @@ BETTER_AUTH_SECRET=change_this_in_production
 
 ### 2. Start the Services
 
-```bash
-docker-compose up -d
+```powershell
+proto install   # One-time: pinned toolchain (node/pnpm/python/deno/uv)
+.\run.ps1       # Start worker, API, frontend (+ auto-bootstrap Postgres/Redis)
 ```
 
 This starts:
-- **Frontend**: http://localhost:3000
+- **Frontend**: http://localhost:3107
 - **Backend API**: http://localhost:8000 (docs at /docs)
-- **PostgreSQL**: localhost:5432
+- **Worker** (arq): background video processing
+- **PostgreSQL**: localhost:5433
 - **Redis**: localhost:6379
+
+Stop everything with `.\stop.ps1`.
 
 ### 3. Wait for Initialization
 
-First-time startup takes a few minutes. Check progress with:
-
-```bash
-docker-compose logs -f
-```
-
-Wait until you see health checks passing for all services.
+First-time startup installs dependencies (backend `uv sync`, frontend `pnpm install`).
+Check progress in `.local/logs/` (`backend.*.log`, `worker.*.log`, `frontend.*.log`).
 
 ### 4. Access the App
 
-Open http://localhost:3000 in your browser, create an account, and start clipping!
+Open http://localhost:3107 in your browser, create an account, and start clipping!
 
 If you enable DataFast, also verify that:
 - `/js/script.js` loads from your own app domain
@@ -145,13 +145,12 @@ If you enable DataFast, also verify that:
 - Make sure you've set the correct LLM provider AND its corresponding API key in `.env`
 - Default is `google-gla:gemini-3-flash-preview` which requires `GOOGLE_API_KEY`
 - If using `openai:gpt-5.2`, you MUST set `OPENAI_API_KEY`
-- If using `ollama:*`, run Ollama and optionally set `OLLAMA_BASE_URL`
-  (`http://localhost:11434/v1` for local backend runs, `http://host.docker.internal:11434/v1` for Docker)
-- Rebuild after changing `.env`: `docker-compose up -d --build`
+- If using `ollama:*`, run Ollama and optionally set `OLLAMA_BASE_URL` (`http://localhost:11434/v1`)
+- Restart after changing `.env`: `.\stop.ps1; .\run.ps1`
 
 **Videos stay queued / never process:**
-- Check worker logs: `docker-compose logs -f worker`
-- Ensure Redis is healthy: `docker-compose logs redis`
+- Check worker logs: `.local\logs\worker.*.log`
+- Ensure Redis is healthy: `redis-cli -h localhost -p 6379 ping`
 - Verify API keys are correct
 
 **YouTube titles or duration lookup is failing:**
@@ -168,12 +167,12 @@ If you enable DataFast, also verify that:
 - View aggregate metrics: `GET /tasks/metrics/performance`
 
 **Prisma errors on Windows:**
-- Run `docker-compose down -v` to clear volumes
-- Run `docker-compose up -d --build` to rebuild
+- `.\stop.ps1` then delete `frontend\node_modules` and re-run `.\run.ps1`
+- If schema drift: reset the `supoclip` database (see QUICKSTART.md) and re-run `.\run.ps1`
 
 **Frontend shows database errors:**
-- Wait for PostgreSQL to fully initialize (check logs)
-- The database is automatically created on first run
+- Verify PostgreSQL is running and reachable on port 5433
+- The database and schema are bootstrapped automatically by `run.ps1`
 
 **Font picker is empty / cannot select or upload fonts:**
 - Add fonts to `backend/fonts/` – see [backend/fonts/README.md](backend/fonts/README.md) for TikTok Sans and custom fonts
@@ -212,7 +211,7 @@ cd frontend && npm install && npm run test:coverage
 cd frontend && npm run test:e2e
 ```
 
-Local test runs expect PostgreSQL and Redis to be available. The easiest path is to start the stack with `docker-compose up -d`, then run the commands above. CI runs the same layers in GitHub Actions with Postgres and Redis service containers.
+Local test runs expect PostgreSQL and Redis to be available. The easiest path is to start the stack with `.\run.ps1`, then run the commands above. CI runs the same layers in GitHub Actions with Postgres and Redis service containers.
 
 ## Documentation
 
@@ -246,9 +245,9 @@ Required env vars for this flow:
 - `STRIPE_WEBHOOK_SECRET`
 - `STRIPE_PRICE_ID`
 
-### Local Development (Without Docker)
+### Local Development
 
-See [CLAUDE.md](CLAUDE.md) for detailed development instructions.
+See [CLAUDE.md](CLAUDE.md) and [QUICKSTART.md](QUICKSTART.md) for detailed development instructions.
 
 ## License
 

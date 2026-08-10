@@ -12,14 +12,14 @@ operating the service in the monorepo — not the model internals.
 ## Overview
 
 The service is a FastAPI app (`src/main.py`) that owns one model pair per
-container, runs inference on CUDA with a **serial queue** (at most one
+process, runs inference on CUDA with a **serial queue** (at most one
 transcription at a time), and exposes three endpoints: `POST /v1/transcribe`,
 `GET /health`, and `GET /` (plus the auto-generated `/docs` Swagger UI).
 
 ```
 ┌────────────────────┐  TRANSCRIPT_PROVIDER=local_asr   ┌───────────────────────────────┐
 │ worker (arq)       │ ── POST /v1/transcribe ─────────▶ │ asr (FastAPI)                │
-│ video_utils.py     │     ASR_BASE_URL=http://asr:8765  │  Qwen3-ASR-1.7B              │
+│ video_utils.py     │     ASR_BASE_URL=http://localhost:8765  │  Qwen3-ASR-1.7B     │
 │                    │                                   │  Qwen3-ForcedAligner-0.6B    │
 │                    │                                   │  CUDA bf16, serial queue      │
 └─────────┬──────────┘                                   └───────────────────────────────┘
@@ -39,40 +39,34 @@ host.
 - **NVIDIA GPU with 8 GB VRAM** (verified with `Qwen/Qwen3-ASR-1.7B` +
   `Qwen/Qwen3-ForcedAligner-0.6B`). The model pair runs in `bfloat16` with
   batch size 1.
-- **Podman machine** with **≥ 10 GiB memory**, and **CDI configured**:
-  `nvidia-container-toolkit` installed and the CDI spec present at
-  `/etc/cdi/nvidia.yaml` inside the machine.
-- Verify GPU passthrough before first start:
-
-  ```bash
-  podman run --rm --device nvidia.com/gpu=all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
-  ```
-
-- Disk headroom: the **first image build is ~8–9 GB** (PyTorch CUDA 12.4 base
-  image) and the **first model download is ~6 GB**, written into the
-  `asr_models` named volume (`HF_HOME=/models` inside the container).
+- **CUDA-enabled PyTorch** available to the `asr/.venv` (the `gpu` extra
+  installs the `qwen-asr` stack). On Windows, verify `nvidia-smi` works and
+  the CUDA wheels can be installed.
+- Disk headroom: the **first `uv sync --extra gpu` is ~8–9 GB** (PyTorch CUDA
+  wheels) and the **first model download is ~6 GB**, written to `HF_HOME`
+  (default `asr/models`).
 
 ## Run
 
 ### Combined with the rest of the stack
 
-The `asr` service is defined **inside** the root `docker-compose.yml` (single
-compose file — no overlay). From the repository root:
+`run.ps1` starts the native ASR service automatically when
+`TRANSCRIPT_PROVIDER=local_asr` (or with `.\run.ps1 -IncludeAsr`), provided
+the `asr/.venv` exists:
 
-```bash
-podman compose up -d --build
+```powershell
+cd asr
+uv sync --extra gpu      # one-time: installs torch + qwen-asr
+cd ..
+.\run.ps1                # starts asr on http://localhost:8765
 ```
-
-Appending `asr` (`... up -d --build asr`) builds and starts only the ASR
-service.
 
 ### Standalone (debugging)
 
-The `asr` service joins the default network (named `supoclip-network`), so it
-can be run alone while the rest of the stack is stopped:
-
-```bash
-podman compose up -d asr
+```powershell
+cd asr
+uv sync --extra gpu
+uv run uvicorn src.main:app --host 0.0.0.0 --port 8765
 ```
 
 ### Smoke test
@@ -89,17 +83,11 @@ argument, it synthesizes a 2-second 440 Hz tone via `ffmpeg`; if `ffmpeg` is
 unavailable it performs the health check only and exits 0. Override the target
 with `ASR_URL` (default `http://127.0.0.1:8765`).
 
-### Stop / teardown / logs
+### Stop
 
-```bash
-podman compose stop asr                   # stop only ASR
-podman compose down                       # full stack teardown
-
-podman logs -f supoclip-asr
-```
-
-`down` without `-v` keeps the `asr_models` volume, so downloaded weights
-survive rebuilds.
+Stop the ASR process with `.\stop.ps1` (it also stops the rest of the stack)
+or kill the `uvicorn ... --port 8765` process. Model weights persist under
+`asr/models` (`HF_HOME`), so restarts are fast.
 
 ## API contract
 
@@ -109,7 +97,7 @@ Multipart form:
 
 | Field           | Required | Type   | Notes                                                        |
 |-----------------|:--------:|--------|--------------------------------------------------------------|
-| `audio`         | yes      | file   | Uploaded audio file; any container-supported format          |
+| `audio`         | yes      | file   | Uploaded audio file; any ffmpeg/decoder-supported format        |
 | `language`      | no       | string | Optional language hint passed to the model                   |
 | `max_new_tokens`| no       | int    | Default `256`, clamped to `[1, 2048]`                        |
 
@@ -184,41 +172,38 @@ or `INFERENCE_FAILED` (status ≥ 500) with `retryable` mirroring status ≥ 500
 
 ## Configuration
 
-All configuration is via environment variables (`src/config.py`). The compose
-file passes `ASR_MODEL`, `ASR_ALIGNER`, `ASR_REQUEST_TIMEOUT_SECONDS`, and
-`MAX_AUDIO_MB` through `${VAR:-default}` from the host environment / `.env`
-(the defaults shown below are the compose defaults); `ASR_PORT` and `HF_HOME`
-are fixed in the compose file.
+All configuration is via environment variables (`src/config.py`). `run.ps1`
+passes `ASR_MODEL`, `ASR_ALIGNER`, `ASR_REQUEST_TIMEOUT_SECONDS`,
+`MAX_AUDIO_MB`, and `HF_HOME` through from the environment / `.env` when set;
+`ASR_PORT` is read by the service config (default `8765`).
 
 | Variable                   | Default                             | Meaning                                                        |
 |----------------------------|-------------------------------------|----------------------------------------------------------------|
 | `ASR_MODEL`                | `Qwen/Qwen3-ASR-1.7B`               | HF repo id of the transcription model                          |
 | `ASR_ALIGNER`              | `Qwen/Qwen3-ForcedAligner-0.6B`     | HF repo id of the forced aligner (word timestamps)             |
-| `ASR_PORT`                 | `8765`                              | Port the service config reads. The container always binds 8765 — the `Dockerfile` CMD passes `--port 8765` explicitly; changing it requires editing the CMD and the compose port mapping |
+| `ASR_PORT`                 | `8765`                              | Port the service binds                                         |
 | `ASR_REQUEST_TIMEOUT_SECONDS` | `600`                            | Per-request inference timeout; exceeded → `TIMEOUT` (504)      |
 | `MAX_AUDIO_MB`             | `64`                                | Upload size limit; exceeded → `AUDIO_TOO_LARGE` (413)          |
-| `ASR_FAKE_MODEL`           | `0`                                 | **Dev-only** — `1`/`true`/`yes` loads a deterministic fake model, no GPU/torch. Never enable in production. Not set by compose |
-| `HF_HOME`                  | `/models`                           | HuggingFace cache root; mounted as the `asr_models` volume     |
+| `ASR_FAKE_MODEL`           | `0`                                 | **Dev-only** — `1`/`true`/`yes` loads a deterministic fake model, no GPU/torch. Never enable in production. |
+| `HF_HOME`                  | `asr/models`                        | HuggingFace cache root for downloaded weights                  |
 
 ## Integration with SupoClip
 
-The worker (not the backend API) is the ASR client. Its root-compose
-environment declares:
+The worker (not the backend API) is the ASR client. It reads the environment:
 
-```yaml
-- TRANSCRIPT_PROVIDER=${TRANSCRIPT_PROVIDER:-assemblyai}
-- ASR_BASE_URL=${ASR_BASE_URL:-http://asr:8765}
+```
+TRANSCRIPT_PROVIDER=local_asr
+ASR_BASE_URL=http://localhost:8765
 ```
 
 - **The local provider is opt-in.** `TRANSCRIPT_PROVIDER` defaults to
-  `assemblyai`; set `TRANSCRIPT_PROVIDER=local_asr` in your environment /
-  `.env` to route the worker's `generate_transcript` through
-  `get_video_transcript_local` instead of the AssemblyAI client.
-  `backend/src/config.py` also falls back to `http://localhost:8765` for
-  `ASR_BASE_URL` outside compose.
-- **Service discovery**: the `asr` service joins the compose default network
-  (named `supoclip-network`), so the worker reaches it at `http://asr:8765`
-  (mapped to `127.0.0.1:8765` on the host for local smoke tests).
+  `assemblyai`; set `TRANSCRIPT_PROVIDER=local_asr` in `.env` to route the
+  worker's `generate_transcript` through `get_video_transcript_local` instead
+  of the AssemblyAI client. `backend/src/config.py` falls back to
+  `http://localhost:8765` for `ASR_BASE_URL` when unset.
+- **Networking**: the worker reaches the native service at
+  `http://localhost:8765` on the same host. Start ASR before the worker
+  attempts a transcription (or rely on the worker's retry).
 - **Audio prep**: the worker extracts a mono 16 kHz 64 kbps MP3
   (`<stem>.assemblyai.mp3`, cached next to the video) via ffmpeg, then POSTs it
   as multipart `audio` with a hardcoded `audio/mpeg` content type. If ffmpeg is
@@ -244,49 +229,23 @@ environment declares:
 
 - **CUDA unavailable at boot — fail-fast.** `ModelRuntime.load()` raises
   `RuntimeError("CUDA is not available — ASR service requires a GPU
-  (fail-fast)")`; the lifespan aborts and the container exits. Check
-  `podman logs supoclip-asr` and fix the CDI/device passthrough before
-  restarting (`restart: unless-stopped` will otherwise retry in a loop).
+  (fail-fast)")`; the process aborts. Check `nvidia-smi` and the torch CUDA
+  build before restarting.
 - **OOM on 8 GB VRAM.** During inference a GPU OOM maps to `INFERENCE_FAILED`
   (500) with guidance in the detail: set `ASR_MODEL=Qwen/Qwen3-ASR-0.6B` or
   move the aligner off-GPU (the aligner also loads onto `cuda:0` by default).
 - **Long first startup is expected.** First boot downloads ~6 GB of weights
-  and loads both models; the healthcheck's `start_period: 300s` absorbs this,
-  so the container may report `unhealthy` for several minutes before settling.
-  Subsequent boots are much faster because the `asr_models` volume persists.
+  and loads both models. Subsequent boots are much faster because weights
+  persist under `HF_HOME` (`asr/models`).
 - **Timestamps missing for non-11 aligner languages.** The forced aligner
   supports a limited language set (~11 languages); for other languages it
   returns no word timing, so `timestamps` is `false` and subtitles degrade to
   the hook title only. The transcript cache still stores the raw text.
-- **Worker may start before ASR is ready.** The root compose declares no
-  `depends_on` between `worker` and `asr`. The worker's 3-attempt retry
+- **Worker may start before ASR is ready.** The worker's 3-attempt retry
   absorbs transient connection errors, but a transcription attempt that lands
   in the model-load window (503, retryable) can still exhaust its retries —
-  prefer starting `asr` first (or the combined command above).
-- **podman-compose device passthrough fallback.** If your podman-compose
-  setup does not forward the `devices: ["nvidia.com/gpu=all"]` entry, run the
-  container directly:
-
-  ```bash
-  podman run -d --name supoclip-asr \
-    --device nvidia.com/gpu=all \
-    --network supoclip-network \
-    -v asr_models:/models \
-    -p 127.0.0.1:8765:8765 \
-    -e HF_HOME=/models \
-    supoclip-asr
-  ```
-
-- **Slow/stalled image pulls from docker.io inside the podman machine.**
-  On WSL-backed machines, large registry transfers can stall while small ones
-  succeed. Lowering the machine's eth0 MTU to 1400 unblocks them:
-
-  ```bash
-  podman machine ssh -- sudo ip link set dev eth0 mtu 1400
-  ```
-
-  The change is lost on machine restart; re-apply after
-  `podman machine stop/start` (or add it to the machine's startup config).
+  prefer starting ASR first (or let `run.ps1` start it before submitting
+  tasks).
 
 ## Development
 

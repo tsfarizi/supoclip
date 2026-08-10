@@ -992,22 +992,28 @@ def ffprobe_duration(video_path: Path) -> float:
 
 
 def ffmpeg_escape_filter_path(path: Path) -> str:
-    """Escape a path for use inside an ffmpeg filter argument."""
+    """Escape a path for use inside an ffmpeg filter argument.
+
+    Windows drive colons must survive BOTH the filtergraph parser and the
+    filter's own option parser, so each colon becomes `\\:` (two literal
+    backslashes + colon) and backslashes are converted to forward slashes
+    (libass/ffmpeg open both forms on Windows).
+    """
     return (
         str(path)
-        .replace("\\", "\\\\")
-        .replace(":", "\\:")
+        .replace("\\", "/")
+        .replace(":", "\\\\:")
         .replace("'", "\\'")
         .replace(" ", "\\ ")
     )
 
 
 def ffmpeg_escape_filter_value(value: str) -> str:
-    """Escape an ffmpeg filter option value."""
+    """Escape an ffmpeg filter option value (same rules as filter paths)."""
     return (
         str(value)
-        .replace("\\", "\\\\")
-        .replace(":", "\\:")
+        .replace("\\", "/")
+        .replace(":", "\\\\:")
         .replace("'", "\\'")
         .replace(" ", "\\ ")
     )

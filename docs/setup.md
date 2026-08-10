@@ -1,17 +1,19 @@
 # Setup
 
-This guide covers the recommended Docker setup, local development mode, and the checks to perform after first boot.
+This guide covers the native (no-container) setup, the checks to perform after first boot, and the pieces the one-command launcher manages for you.
 
 ## Requirements
 
 ### Required software
 
-- Docker Desktop or a Docker Engine installation with Compose support
+- [proto](https://moonrepo.dev/docs/proto/install) — toolchain version manager
 - Git
+- PostgreSQL installed and running as a service (this machine: PG18 on port **5433**)
+- FFmpeg available on PATH (or a portable build under `%LOCALAPPDATA%\Programs\ffmpeg`)
 
 ### Required credentials
 
-- `ASSEMBLY_AI_API_KEY`
+- `ASSEMBLY_AI_API_KEY` (or a native ASR service with `TRANSCRIPT_PROVIDER=local_asr`)
 - One LLM provider configuration:
   - `OPENAI_API_KEY` with `LLM=openai:...`
   - `GOOGLE_API_KEY` with `LLM=google-gla:...`
@@ -26,9 +28,9 @@ This guide covers the recommended Docker setup, local development mode, and the 
 - Stripe keys if you are running with monetization enabled
 - Discord webhook URLs for feedback forwarding
 
-## Recommended Setup: Docker
+## Recommended Setup: Native Stack
 
-Docker is the intended path for running SupoClip because it starts the frontend, backend, worker, PostgreSQL, and Redis together with the expected wiring.
+The native path starts the frontend, backend, worker, PostgreSQL, and Redis together with the expected wiring.
 
 ### 1. Clone the repository
 
@@ -37,7 +39,15 @@ git clone <your-repo-url>
 cd supoclip
 ```
 
-### 2. Create a local environment file
+### 2. Install the pinned toolchain
+
+All runtime versions (node, pnpm, python, deno, uv) are pinned in `.prototools`:
+
+```bash
+proto install
+```
+
+### 3. Create a local environment file
 
 ```bash
 cp .env.example .env
@@ -58,47 +68,35 @@ NEXT_PUBLIC_DATAFAST_DOMAIN=your-domain.com
 NEXT_PUBLIC_DATAFAST_ALLOW_LOCALHOST=false
 ```
 
-### 3. Start the stack
+### 4. Start the stack
 
-Fastest option:
-
-```bash
-./start.sh
+```powershell
+.\run.ps1
 ```
 
-Manual equivalent:
+The launcher:
+- installs anything missing from `.prototools`
+- starts a portable Redis when none is listening on 6379
+- bootstraps the `supoclip` role/database and applies `init.sql` when the schema is missing
+- installs backend and frontend dependencies on first run
+- starts worker, backend API, and frontend with logs in `.local/logs/`
 
-```bash
-docker-compose up -d --build
-```
+### 5. Verify services
 
-### 4. Wait for services to become healthy
+Logs live in `.local/logs/` (`backend.*.log`, `worker.*.log`, `frontend.*.log`). The launcher prints a health summary.
 
-```bash
-docker-compose logs -f
-docker-compose ps
-```
+### 6. Open the application
 
-You should see these services:
-
-- `supoclip-frontend`
-- `supoclip-backend`
-- `supoclip-worker`
-- `supoclip-postgres`
-- `supoclip-redis`
-
-### 5. Open the application
-
-- Frontend: `http://localhost:3000`
+- Frontend: `http://localhost:3107`
 - Backend API: `http://localhost:8000`
 - FastAPI docs: `http://localhost:8000/docs`
 
-## What Docker Starts
+## What the Native Stack Starts
 
-The default Compose stack contains five services:
+Four processes/infra:
 
 - `frontend`
-  - Next.js application on port `3000`
+  - Next.js application on port `3107`
   - Proxies authenticated requests to the backend
 - `backend`
   - FastAPI API on port `8000`
@@ -106,16 +104,15 @@ The default Compose stack contains five services:
 - `worker`
   - ARQ background worker
   - Processes long-running video jobs from Redis
-- `postgres`
-  - Stores users, sessions, tasks, sources, clips, billing metadata, and auth rotation state
-- `redis`
-  - Backs the job queue and progress event flow
+- `postgres` / `redis`
+  - Stores users, sessions, tasks, sources, clips, billing metadata (PG on 5433)
+  - Backs the job queue and progress event flow (Redis on 6379)
 
 ## First-Run Checklist
 
 After the stack is up:
 
-1. Load the homepage at `http://localhost:3000`.
+1. Load the homepage at `http://localhost:3107`.
 2. Create an account or sign in.
 3. Submit a YouTube URL or upload a video file.
 4. Open the task page and confirm progress updates appear.
@@ -124,54 +121,58 @@ After the stack is up:
 7. If DataFast is enabled, open browser devtools and confirm `/js/script.js` and `/api/events` load from your own domain.
 8. Trigger one successful action such as sign-up, sign-in, task creation, feedback submission, or waitlist submission and verify the goal arrives in DataFast.
 
-## Local Development Without Docker
+## Running Apps Individually
 
-Use this mode if you need to iterate on a single app directly. You still need PostgreSQL and Redis running somewhere.
+You still need PostgreSQL and Redis running.
 
 ### Backend
 
 ```bash
 cd backend
-uv venv .venv
-source .venv/bin/activate
 uv sync
-uvicorn src.main_refactored:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn src.main_refactored:app --reload --host 0.0.0.0 --port 8000
 ```
 
 In a second terminal:
 
 ```bash
 cd backend
-source .venv/bin/activate
-arq src.workers.tasks.WorkerSettings
+uv run arq src.workers.tasks.WorkerSettings
 ```
 
 ### Frontend
 
 ```bash
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
+```
+
+### MCP server (optional)
+
+```bash
+cd mcp
+uv sync
+uv run supoclip-mcp
 ```
 
 ### Required local dependencies
 
-- Python 3.11+
-- Node.js compatible with Next.js 15
+- Python 3.11+ (proto-pinned)
+- Node.js compatible with Next.js 15 (proto-pinned)
 - PostgreSQL
-- Redis
+- Redis (portable build auto-started by `run.ps1`)
 - FFmpeg available to the backend environment
 
-## Data and Volumes
+## Data and Storage
 
-With Docker, SupoClip stores persistent data in named volumes:
+Natively, the stack shares one filesystem tree (`TEMP_DIR`, default `backend/data`):
 
-- `postgres_data`
-- `redis_data`
-- `uploads`
-- `clips`
+- `backend/data/uploads`
+- `backend/data/clips`
+- `backend/data/broll`
 
-The backend also mounts these local directories:
+Persistent data lives in the PostgreSQL data directory and Redis dump file. These local directories are read directly from the repository:
 
 - `backend/fonts`
 - `backend/transitions`
@@ -203,34 +204,35 @@ For anything beyond local experimentation:
 
 ## Useful Commands
 
-### Start or rebuild
+### Start the stack
 
-```bash
-docker-compose up -d --build
+```powershell
+.\run.ps1
 ```
 
 ### Stream logs
 
-```bash
-docker-compose logs -f
-docker-compose logs -f backend
-docker-compose logs -f worker
+```powershell
+Get-Content .local\logs\backend.out.log -Wait
+Get-Content .local\logs\worker.out.log -Wait
+Get-Content .local\logs\frontend.out.log -Wait
 ```
 
 ### Stop services
 
-```bash
-docker-compose down
+```powershell
+.\stop.ps1
 ```
 
-### Reset containers and volumes
+### Reset the database
 
-```bash
-docker-compose down -v
-docker-compose up -d --build
+```powershell
+# WARNING: This deletes all data!
+$env:PGPASSWORD='postgres'
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -U postgres -h localhost -p 5433 -d postgres -c "DROP DATABASE supoclip;"
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -U postgres -h localhost -p 5433 -d postgres -c "CREATE DATABASE supoclip OWNER supoclip;"
+.\run.ps1   # re-applies init.sql
 ```
-
-Warning: `docker-compose down -v` deletes database and Redis data.
 
 ## Next Steps
 

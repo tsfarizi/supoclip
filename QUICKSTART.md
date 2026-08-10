@@ -1,11 +1,12 @@
 # SupoClip Quick Start Guide
 
-Run SupoClip with Docker in just one command!
+Run SupoClip natively on Windows with a single command. No Docker, no containers.
 
 ## Prerequisites
 
-1. **Docker Desktop** installed and running
-2. **API Keys** (get these from the providers):
+1. **proto** installed — [moonrepo.dev/docs/proto/install](https://moonrepo.dev/docs/proto/install)
+2. **PostgreSQL** installed and running as a service (this machine: PG18 on port **5433**)
+3. **API Keys** (get these from the providers):
    - [AssemblyAI API Key](https://www.assemblyai.com/) (required for transcription)
    - At least one AI provider:
       - [OpenAI API Key](https://platform.openai.com/api-keys) (recommended)
@@ -15,15 +16,19 @@ Run SupoClip with Docker in just one command!
 
 ## Quick Start (Single Command)
 
-```bash
-./start.sh
+```powershell
+.\run.ps1
 ```
 
 That's it! The script will:
-- Check prerequisites
-- Build Docker images
-- Start all services
-- Show you where to access the app
+- Install the pinned toolchain (node/pnpm/python/deno/uv) via proto
+- Start Redis and ffmpeg from portable user-scope installs when missing
+- Bootstrap the `supoclip` role, database, and schema on PostgreSQL
+- Install Python and frontend dependencies
+- Start the worker, backend API, and frontend (logs in `.local/logs/`)
+- Print the URLs to access everything
+
+Stop everything with `.\stop.ps1`.
 
 ## First Time Setup
 
@@ -32,55 +37,60 @@ That's it! The script will:
 Edit the `.env` file in the project root and add your API keys:
 
 ```bash
-# Required for video transcription
+# Required for video transcription (or use TRANSCRIPT_PROVIDER=local_asr with the native ASR service)
 ASSEMBLY_AI_API_KEY=your_assemblyai_key_here
 
 # Choose one AI provider for clip selection
-OPENAI_API_KEY=your_openai_key_here
+GOOGLE_API_KEY=your_google_key_here
 
 # Configure which AI model to use
-LLM=openai:gpt-4
+LLM=google-gla:gemini-3-flash-preview
 
 # OR use Ollama locally
 # LLM=ollama:gpt-oss:20b
 # OLLAMA_BASE_URL=http://localhost:11434/v1
 
 # Optional: Amazon SES for waitlist + subscription lifecycle emails
-# Required if you want hosted billing emails when SELF_HOST=false
 # AWS_REGION=us-east-1
 # AWS_ACCESS_KEY_ID=your_aws_access_key_id
 # AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
-# SES_FROM_EMAIL="SupoClip <onboarding@example.com>"
 ```
 
 ### 2. Start SupoClip
 
-```bash
-./start.sh
+```powershell
+.\run.ps1
 ```
 
 ### 3. Access the Application
 
-- **Frontend**: http://localhost:3000
+- **Frontend**: http://localhost:3107
 - **Backend API**: http://localhost:8000
 - **API Documentation**: http://localhost:8000/docs
 
-## Manual Docker Commands
+## Manual Commands
 
-If you prefer to use Docker commands directly:
+If you prefer to run each piece yourself:
 
-```bash
-# Start all services
-docker-compose up -d --build
+```powershell
+# One-time toolchain
+proto install
 
-# View logs
-docker-compose logs -f
+# Backend API + worker (two terminals)
+cd backend
+uv sync
+uv run uvicorn src.main_refactored:app --host 0.0.0.0 --port 8000   # terminal 1
+uv run arq src.workers.tasks.WorkerSettings                          # terminal 2
 
-# Stop all services
-docker-compose down
+# Frontend
+cd frontend
+pnpm install
+pnpm run dev
 
-# Rebuild after code changes
-docker-compose up -d --build
+# MCP server (optional)
+cd mcp
+uv sync
+uv run supoclip-mcp
 ```
 
 ## Environment Configuration
@@ -90,147 +100,72 @@ docker-compose up -d --build
 | Variable | Description | Where to Get |
 |----------|-------------|--------------|
 | `ASSEMBLY_AI_API_KEY` | Speech-to-text transcription | https://www.assemblyai.com/ |
-| `LLM` | AI model identifier | e.g., `openai:gpt-5.2` or `ollama:gpt-oss:20b` |
+| `LLM` | AI model identifier | e.g., `google-gla:gemini-3-flash-preview` or `ollama:gpt-oss:20b` |
 
 ### Optional Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_MODEL_SIZE` | `medium` | Whisper model size (tiny/base/small/medium/large) |
+| `TRANSCRIPT_PROVIDER` | `assemblyai` | `assemblyai` or `local_asr` (native ASR service on :8765) |
+| `DATABASE_URL` | `postgresql+asyncpg://supoclip:supoclip_password@localhost:5433/supoclip` | Backend PostgreSQL connection |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Redis connection |
+| `TEMP_DIR` | `backend/data` | Shared working dir (run.ps1 overrides with an absolute path) |
 | `BETTER_AUTH_SECRET` | dev secret | Auth secret (change in production!) |
 | `GOOGLE_API_KEY` | - | For Google Gemini models |
-| `ANTHROPIC_API_KEY` | - | For Claude models |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | For local/self-hosted Ollama endpoint |
-| `OLLAMA_API_KEY` | - | Optional, required for Ollama Cloud |
-| `AWS_REGION` | `us-east-1` | Optional in self-host mode, required for hosted billing/waitlist emails |
-| `AWS_ACCESS_KEY_ID` | - | Optional in self-host mode, required for hosted billing/waitlist emails |
-| `AWS_SECRET_ACCESS_KEY` | - | Optional in self-host mode, required for hosted billing/waitlist emails |
-| `SES_FROM_EMAIL` | `SupoClip <onboarding@example.com>` | Verified sender for backend subscription emails |
 
-### Hosted Billing Email Setup
+### Local Transcription (ASR)
 
-If you enable hosted monetization with `SELF_HOST=false`, set these as well:
+The worker calls the native ASR service at `http://localhost:8765` when
+`TRANSCRIPT_PROVIDER=local_asr`. Set it up once (GPU recommended):
 
-| Variable | Description |
-|----------|-------------|
-| `BACKEND_AUTH_SECRET` | Shared secret used by frontend API routes to call the backend |
-| `STRIPE_SECRET_KEY` | Stripe server-side API key |
-| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
-| `STRIPE_PRO_PRICE_ID` | Stripe price ID for the $10 Pro subscription |
-| `STRIPE_SCALE_PRICE_ID` | Stripe price ID for the $50 Scale subscription |
-| `STRIPE_PRICE_ID` | Legacy fallback Stripe price ID for the Pro subscription |
-| `PRO_PLAN_TASK_LIMIT` | Pro monthly generation limit, usually `50` |
-| `SCALE_PLAN_TASK_LIMIT` | Scale monthly generation limit, usually `300` |
-| `AWS_REGION` | AWS region used for Amazon SES, default `us-east-1` |
-| `AWS_ACCESS_KEY_ID` | AWS access key ID used to send subscription emails via Amazon SES |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret access key used to send subscription emails via Amazon SES |
-| `SES_FROM_EMAIL` | Verified sender address used for subscription emails |
-
-The billing flow sends:
-
-- A thank-you email after `checkout.session.completed`
-- A cancellation email after `customer.subscription.deleted`
-
-## Supported AI Models
-
-### OpenAI (Recommended)
-```bash
-LLM=openai:gpt-4
-LLM=openai:gpt-4-turbo
-LLM=openai:gpt-3.5-turbo
+```powershell
+cd asr
+uv sync --extra gpu
+# then run.ps1 starts it automatically when TRANSCRIPT_PROVIDER=local_asr
 ```
 
-### Anthropic
-```bash
-LLM=anthropic:claude-3-5-sonnet-20241022
-LLM=anthropic:claude-3-opus
-LLM=anthropic:claude-3-haiku
-```
+For a GPU-free smoke test, set `ASR_FAKE_MODEL=1` in the environment when starting the ASR service.
 
-### Google
-```bash
-LLM=google-gla:gemini-3-flash-preview
-LLM=google-gla:gemini-3-pro-preview
-```
+## Architecture
 
-### Ollama
-```bash
-LLM=ollama:gpt-oss:20b
-OLLAMA_BASE_URL=http://localhost:11434/v1
-```
+SupoClip runs 4 native processes (managed by `run.ps1`):
+
+1. **Frontend** (Next.js 15) - Port 3107
+2. **Backend** (FastAPI + Python) - Port 8000
+3. **Worker** (arq, async Redis queue) - processes video in the background
+4. **Infra**: PostgreSQL (5433) + Redis (6379)
+
+All processes share PostgreSQL, Redis, and the `TEMP_DIR` filesystem tree.
 
 ## Troubleshooting
 
 ### Services not starting?
 
-1. **Check Docker is running**:
-   ```bash
-   docker info
-   ```
-
-2. **View service logs**:
-   ```bash
-   docker-compose logs -f
-   ```
-
-3. **Check service health**:
-   ```bash
-   docker-compose ps
-   ```
+1. **Logs**: every process writes to `.local/logs/` (`backend.*.log`, `worker.*.log`, `frontend.*.log`).
+2. **PostgreSQL**: verify the service is running (`Get-Service postgresql-x64-18`) and listening on 5433.
+3. **Redis**: `run.ps1` starts a portable redis-server under `%LOCALAPPDATA%\Programs\redis` when needed.
 
 ### API Keys not working?
 
 1. Verify keys are set in `.env` file
 2. Ensure no extra spaces around the `=` sign
-3. Restart services after changing `.env`:
-   ```bash
-   docker-compose down
-   docker-compose up -d
-   ```
+3. Restart the stack: `.\stop.ps1; .\run.ps1`
 
 ### Database issues?
 
-Reset the database:
-```bash
-docker-compose down -v  # WARNING: This deletes all data!
-docker-compose up -d
+Reset the database schema:
+
+```powershell
+# WARNING: This deletes all data!
+$env:PGPASSWORD='postgres'; & 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -U postgres -h localhost -p 5433 -d postgres -c "DROP DATABASE supoclip;"
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -U postgres -h localhost -p 5433 -d postgres -c "CREATE DATABASE supoclip OWNER supoclip;"
+.\run.ps1   # re-applies init.sql
 ```
-
-## Architecture
-
-SupoClip runs 4 Docker containers:
-
-1. **Frontend** (Next.js 15) - Port 3000
-2. **Backend** (FastAPI + Python) - Port 8000
-3. **PostgreSQL** - Port 5432
-4. **Redis** - Port 6379
-
-All services are connected via a Docker network and start automatically with proper health checks.
-
-## What Happens When You Run `./start.sh`?
-
-1. Checks if `.env` file exists with required API keys
-2. Verifies Docker is running
-3. Builds Docker images (first time: ~5-10 minutes)
-4. Starts PostgreSQL and waits for it to be healthy
-5. Starts Redis cache
-6. Starts backend API server
-7. Starts frontend web server
-8. Displays URLs for accessing the application
-
-## Production Deployment
-
-For production use:
-
-1. Change `BETTER_AUTH_SECRET` to a secure random string
-2. Use strong database passwords
-3. Enable HTTPS with a reverse proxy (nginx/Caddy)
-4. Set up persistent volumes for data
-5. Configure backup strategies
 
 ## Next Steps
 
-- Read the full documentation in `CLAUDE.md`
+- Read the full documentation in `docs/`
 - Check out the API docs at http://localhost:8000/docs
 - View example clips in the frontend
 - Customize fonts by adding TTF files to `backend/fonts/`
@@ -238,6 +173,6 @@ For production use:
 
 ## Getting Help
 
-- Check logs: `docker-compose logs -f`
+- Check logs in `.local/logs/`
 - View API documentation: http://localhost:8000/docs
 - Report issues: Create a GitHub issue with logs and error messages

@@ -6,11 +6,14 @@ import { useParams } from "next/navigation";
 import {
   ArrowLeft,
   AudioLines,
+  Check,
   Clapperboard,
   Download,
   Gauge,
   Layers,
+  Loader2,
   Palette,
+  RotateCcw,
   Scissors,
   SplitSquareVertical,
   Subtitles,
@@ -109,6 +112,7 @@ export default function TaskEditPage() {
   const [highlightWords, setHighlightWords] = useState<string[]>([]);
   const [subtitleSize, setSubtitleSize] = useState(52);
   const [subtitleY, setSubtitleY] = useState(78);
+  const [captionSaved, setCaptionSaved] = useState(false);
 
   const [volume, setVolume] = useState(100);
   const [isMuted, setIsMuted] = useState(false);
@@ -301,6 +305,8 @@ export default function TaskEditPage() {
       });
       if (!response.ok) throw new Error(await buildSupportError(response, "Failed to update captions"));
     });
+    setCaptionSaved(true);
+    window.setTimeout(() => setCaptionSaved(false), 2500);
   };
 
   const handleMerge = async () => {
@@ -591,10 +597,22 @@ export default function TaskEditPage() {
             </div>
             <h1 className="text-2xl font-bold text-black">{task?.source_title || "Clip Editor"}</h1>
           </div>
-          <Button onClick={handleExport} disabled={!selectedClip || isSaving}>
-            <Download className="w-4 h-4" />
-            {exportProgress !== null ? `Exporting ${exportProgress}%` : "Export Selected"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Select value={exportPreset} onValueChange={setExportPreset}>
+              <SelectTrigger className="w-32">
+                <SelectValue placeholder="Preset" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="tiktok">TikTok</SelectItem>
+                <SelectItem value="reels">Reels</SelectItem>
+                <SelectItem value="shorts">Shorts</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button onClick={handleExport} disabled={!selectedClip || isSaving}>
+              <Download className="w-4 h-4" />
+              {exportProgress !== null ? `Exporting ${exportProgress}%` : "Export Selected"}
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -811,16 +829,28 @@ export default function TaskEditPage() {
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base flex items-center gap-2">
                       <Subtitles className="w-4 h-4" />
-                      Subtitle Control
+                      Subtitle Text
                     </CardTitle>
+                    <p className="text-xs text-gray-500">
+                      Edit the caption script. Words stay in sync with the clip audio.
+                    </p>
                   </CardHeader>
-                  <CardContent className="space-y-3">
-                    <textarea
-                      value={captionText}
-                      onChange={(e) => setCaptionText(e.target.value)}
-                      placeholder="Edit subtitle script"
-                      className="w-full min-h-24 rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
-                    />
+                  <CardContent className="space-y-4">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="caption-text" className="text-sm font-medium text-gray-800">
+                          Caption script
+                        </label>
+                        <span className="text-xs text-gray-500">{subtitleWords.length} words</span>
+                      </div>
+                      <textarea
+                        id="caption-text"
+                        value={captionText}
+                        onChange={(e) => setCaptionText(e.target.value)}
+                        placeholder="Type or paste the caption text that appears on the clip..."
+                        className="w-full min-h-40 resize-y rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm leading-relaxed text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900/20"
+                      />
+                    </div>
 
                     <div className="grid grid-cols-2 gap-2">
                       <Select value={captionPosition} onValueChange={setCaptionPosition}>
@@ -834,16 +864,15 @@ export default function TaskEditPage() {
                         </SelectContent>
                       </Select>
 
-                      <Select value={exportPreset} onValueChange={setExportPreset}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Preset" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="tiktok">TikTok</SelectItem>
-                          <SelectItem value="reels">Reels</SelectItem>
-                          <SelectItem value="shorts">Shorts</SelectItem>
-                        </SelectContent>
-                      </Select>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setCaptionText(selectedClip?.text || "")}
+                        disabled={isSaving || !selectedClip}
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                        Reset to Transcript
+                      </Button>
                     </div>
 
                     <div className="space-y-2">
@@ -863,10 +892,21 @@ export default function TaskEditPage() {
                     </div>
 
                     <div className="space-y-2">
-                      <div className="text-xs text-gray-600">Highlight words (click to toggle)</div>
-                      <div className="max-h-28 overflow-y-auto rounded-md border border-gray-200 p-2 flex flex-wrap gap-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-gray-600">Highlight words (click to toggle)</span>
+                        {highlightWords.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setHighlightWords([])}
+                            className="text-xs text-gray-500 underline underline-offset-2 hover:text-gray-800"
+                          >
+                            Clear all
+                          </button>
+                        )}
+                      </div>
+                      <div className="max-h-32 overflow-y-auto rounded-lg border border-gray-200 p-2 flex flex-wrap gap-1.5">
                         {subtitleWords.length === 0 ? (
-                          <span className="text-xs text-gray-500">No words yet.</span>
+                          <span className="text-xs text-gray-500">Type text above to see words.</span>
                         ) : (
                           subtitleWords.map((word, index) => {
                             const cleaned = word.toLowerCase().replace(/[^a-z0-9']/g, "");
@@ -876,8 +916,10 @@ export default function TaskEditPage() {
                                 key={`${word}-${index}`}
                                 type="button"
                                 onClick={() => toggleHighlightedWord(word)}
-                                className={`px-1.5 py-0.5 rounded text-xs border ${
-                                  highlighted ? "bg-yellow-100 border-yellow-300 text-yellow-900" : "bg-white border-gray-200 text-gray-700"
+                                className={`px-2 py-1 rounded-md text-xs font-medium border transition ${
+                                  highlighted
+                                    ? "bg-yellow-100 border-yellow-300 text-yellow-900"
+                                    : "bg-white border-gray-200 text-gray-700 hover:border-gray-400"
                                 }`}
                               >
                                 {word}
@@ -889,7 +931,8 @@ export default function TaskEditPage() {
                     </div>
 
                     <Button onClick={handleUpdateCaptions} disabled={isSaving || !selectedClip} className="w-full">
-                      Save Subtitle Changes
+                      {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                      {isSaving ? "Rendering..." : captionSaved ? "Saved ✓" : "Save & Re-render Captions"}
                     </Button>
                   </CardContent>
                 </Card>

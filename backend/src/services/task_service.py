@@ -484,7 +484,7 @@ class TaskService:
                 progress=0,
                 progress_message=(
                     "Task timed out while waiting in queue. "
-                    "Ensure the worker service is running and healthy (docker-compose logs -f worker)."
+                    "Ensure the worker process is running (run.ps1 starts it automatically)."
                 ),
             )
             task = await self.task_repo.get_task_by_id(self.db, task_id)
@@ -970,6 +970,8 @@ class TaskService:
             caption_template=task.get("caption_template") or "default",
             transcript_video_path=transcript_video_path,
             source_ranges=self._get_clip_source_ranges(clip),
+            output_format=task.get("output_format") or "vertical",
+            hook_title=clip.get("hook_title"),
         )
         copy_clip_source_ranges(input_path, output_path)
 

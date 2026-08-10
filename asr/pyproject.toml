@@ -12,11 +12,17 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pydantic>=2.6.0",
     "httpx>=0.27.0",
+    # HuggingFace Xet backend: massively faster model downloads for repos
+    # that enable Xet (Qwen3-ASR does). Falls back gracefully when absent.
+    "hf_xet>=1.1.0",
 ]
 
 [project.optional-dependencies]
 gpu = [
     "qwen-asr",
+    # PyPI's Windows torch wheel is CPU-only; pin the CUDA build from the
+    # PyTorch index so local ASR uses the GPU (see [tool.uv.index] below).
+    "torch==2.13.0+cu126",
 ]
 
 [dependency-groups]
@@ -30,3 +36,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+# Resolve torch (and torch-only dependencies) from the PyTorch CUDA 12.6
+# index on every platform; everything else stays on PyPI.
+[tool.uv.sources]
+torch = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

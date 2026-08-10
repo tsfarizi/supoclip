@@ -7,7 +7,6 @@ load_dotenv()
 
 _config_override = None
 LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
-DOCKER_OLLAMA_BASE_URL = "http://host.docker.internal:11434/v1"
 
 
 class Config:
@@ -183,8 +182,6 @@ class Config:
 
     @staticmethod
     def _default_ollama_base_url() -> str:
-        if os.path.exists("/.dockerenv"):
-            return DOCKER_OLLAMA_BASE_URL
         return LOCAL_OLLAMA_BASE_URL
 
     def _infer_default_llm(self) -> str:

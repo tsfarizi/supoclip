@@ -58,7 +58,7 @@ The current repository snapshot includes:
 
 - `frontend/`: the main Next.js application
 - `backend/`: the FastAPI API and ARQ worker code
-- Root-level infrastructure files such as `docker-compose.yml`, `init.sql`, `.env.example`, and `start.sh`
+- Root-level infrastructure files such as `.prototools`, `init.sql`, `.env.example`, `run.ps1`, and `stop.ps1`
 
 Repository guidance still mentions a separate `waitlist/` app, but that directory is not present in this checkout. The documentation in this folder reflects the repository as it exists now.
 

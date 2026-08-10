@@ -28,7 +28,7 @@ YOUTUBE_DOWNLOAD_PROVIDER_YTDLP = "yt_dlp"
 YOUTUBE_DOWNLOAD_PROVIDER_APIFY = "apify"
 YOUTUBE_DATA_API_URL = "https://www.googleapis.com/youtube/v3/videos"
 
-# Per-video download lock: serializes file writes to /app/uploads/<video_id>.*
+# Per-video download lock: serializes file writes to TEMP_DIR/<video_id>.*
 # across concurrent worker tasks. Polling envelope must stay well below the
 # lock TTL (3600s) so a waiting job never overtakes a live download.
 VIDEO_DOWNLOAD_LOCK_KEY_PREFIX = "lock:video_download:"
@@ -724,7 +724,7 @@ async def async_download_youtube_video(
     Download a YouTube video guarded by a per-video Redis lock.
 
     Concurrent jobs for the same video_id wait for the lock before writing to
-    /app/uploads/<video_id>.* instead of racing each other. After acquiring the
+    TEMP_DIR/<video_id>.* instead of racing each other. After acquiring the
     lock, an already-downloaded file is reused so a waiting job never wipes the
     file the first job is still rendering from.
     """

@@ -101,8 +101,8 @@ Authentication: Bearer Token
 Token: sk_your_supoclip_api_key
 ```
 
-With Docker Compose, the `mcp` service runs this mode by default and binds to
-`127.0.0.1:9100` for a reverse proxy.
+In SSE mode the service binds to `127.0.0.1:9100` by default (set
+`SUPOCLIP_MCP_HOST=0.0.0.0` to expose it for a reverse proxy).
 
 ## Use with Claude Desktop / Claude Code
 
