@@ -51,6 +51,7 @@ def test_build_transcript_analysis_prompt_requires_transcript_fidelity():
     assert "Do not merge separate non-contiguous moments into one segment." in prompt
     assert "If there is a tradeoff between \"viral\" and \"accurate\", choose accuracy." in prompt
     assert "Do not reject or penalize a segment simply because of the subject matter" in prompt
+    assert "end_time MUST land at the end of a complete sentence" in prompt
     assert f"Most selected clips should be {IDEAL_CLIP_MIN_SECONDS}-{IDEAL_CLIP_MAX_SECONDS} seconds." in prompt
     assert "viewer would understand and care without seeing the rest" in prompt
     assert "Return one valid JSON object and nothing else." in prompt

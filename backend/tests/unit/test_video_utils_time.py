@@ -19,6 +19,7 @@ import pytest
 
 from src.video_utils import (
     VALID_OUTPUT_FORMATS,
+    _pick_extended_end,
     parse_timestamp_to_seconds,
     seconds_to_mmss,
 )
@@ -96,3 +97,63 @@ class TestValidOutputFormats:
             assert fmt in VALID_OUTPUT_FORMATS
         assert "invalid" not in VALID_OUTPUT_FORMATS
         assert "" not in VALID_OUTPUT_FORMATS
+
+
+class TestPickExtendedEnd:
+    """Pure contract tests for video_utils._pick_extended_end.
+
+    Words are absolute-second dicts in transcript order. The helper never
+    returns a value above cap_end and falls back to last_end when no word is
+    reachable inside the extension window.
+    """
+
+    def word(self, text, start, end):
+        return {"text": text, "start": start, "end": end, "confidence": 1.0}
+
+    def test_sentence_end_with_breath_gap_uses_padding(self):
+        # gap 1.0s >= 0.25 -> word_end + min(padding, gap) = 12.0 + 0.35
+        words = [
+            self.word("Hello", 10.0, 11.0),
+            self.word("world.", 11.2, 12.0),
+            self.word("Next", 13.0, 14.0),
+        ]
+        assert _pick_extended_end(words, 9.0, 20.0, 0.35) == pytest.approx(12.35)
+
+    def test_sentence_end_with_small_gap_stays_before_next_word(self):
+        # gap 0.3s >= 0.25 but smaller than padding -> cut inside the gap
+        words = [
+            self.word("Hi", 10.0, 11.0),
+            self.word("there.", 11.0, 12.0),
+            self.word("next", 12.3, 13.0),
+        ]
+        assert _pick_extended_end(words, 9.0, 20.0, 0.35) == pytest.approx(12.3)
+
+    def test_sentence_end_without_sufficient_gap_uses_padding(self):
+        # gap 0.1s < 0.25 -> fall back to sentence-end + padding
+        words = [
+            self.word("a", 10.0, 11.0),
+            self.word("b.", 11.0, 12.0),
+            self.word("c", 12.1, 13.0),
+        ]
+        assert _pick_extended_end(words, 9.0, 20.0, 0.35) == pytest.approx(12.35)
+
+    def test_no_sentence_end_uses_last_word_end_capped(self):
+        words = [
+            self.word("a", 10.0, 11.0),
+            self.word("b", 11.0, 12.0),
+            self.word("c", 12.0, 13.0),
+        ]
+        assert _pick_extended_end(words, 9.0, 20.0, 0.35) == pytest.approx(13.0)
+        # cap_end cuts the window short of the last word
+        assert _pick_extended_end(words, 9.0, 12.5, 0.35) == pytest.approx(12.5)
+
+    def test_sentence_end_padding_never_exceeds_cap_end(self):
+        words = [self.word("only.", 10.0, 18.5)]
+        assert _pick_extended_end(words, 9.0, 18.6, 0.35) == pytest.approx(18.6)
+
+    def test_cap_end_before_first_word_returns_last_end(self):
+        words = [self.word("later", 20.0, 21.0)]
+        assert _pick_extended_end(words, 10.0, 5.0, 0.35) == 10.0
+
+    def test_empty_words_return_last_end(self):
+        assert _pick_extended_end([], 10.0, 20.0, 0.35) == 10.0

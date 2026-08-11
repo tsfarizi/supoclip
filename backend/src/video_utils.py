@@ -9,6 +9,7 @@ import logging
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 import re
 import uuid
 import shutil
@@ -1060,6 +1061,37 @@ def build_audio_output_args(has_audio: bool, loudnorm: bool = True) -> List[str]
     return args
 
 
+# End-of-clip fade-out (DP-2): the video fade is quantised to 2 frames at
+# OUTPUT_FPS so it reads as a single step, while the audio fade stays a
+# time-based 0.3s to avoid an audible cut. The 0.05s floor keeps clips that
+# are almost entirely fade from getting one at all.
+VIDEO_FADE_FRAMES = 2
+
+
+def build_fade_out_args(
+    duration: float, fade_seconds: float = 0.3
+) -> tuple[str, str] | None:
+    """Build fade-out filter fragments for the end of a clip.
+
+    Returns (video_fade_fragment, audio_af_arg): a `fade` filter fragment to
+    append to the video chain and an `afade` argument for `-af`. Both start at
+    the end of the clip and last fade_seconds (audio) / VIDEO_FADE_FRAMES frames
+    (video). Returns None for non-positive or near-empty clips.
+    """
+    if duration <= 0 or duration < fade_seconds + 0.05:
+        return None
+    video_fade_duration = VIDEO_FADE_FRAMES / OUTPUT_FPS
+    video_fade_fragment = (
+        f"fade=t=out:st={max(0.0, duration - video_fade_duration):.3f}"
+        f":d={video_fade_duration:.3f}"
+    )
+    audio_af_arg = (
+        f"afade=t=out:st={max(0.0, duration - fade_seconds):.3f}"
+        f":d={fade_seconds:.3f}"
+    )
+    return video_fade_fragment, audio_af_arg
+
+
 def subtitles_filter_fragment(
     ass_path: Path, fonts_dir: Optional[Path] = None
 ) -> str:
@@ -1372,13 +1404,59 @@ def word_ends_sentence(text: str) -> bool:
     return bool(SENTENCE_END_RE.search((text or "").strip()))
 
 
+def _pick_extended_end(
+    words: List[Dict[str, Any]],
+    last_end: float,
+    cap_end: float,
+    padding_seconds: float,
+    silence_threshold: float = 0.25,
+) -> float:
+    """Pick the extended end for the final keep range.
+
+    Words are absolute-second dicts in transcript order. Priority:
+    1. First sentence-ending word whose gap to the next word is at least
+       silence_threshold -> cut inside the breath: word_end + min(padding, gap).
+    2. Otherwise the furthest sentence-ending word -> word_end + padding.
+    3. No sentence-ending word -> end of the last word (historical behaviour).
+
+    Never exceeds cap_end; returns last_end when nothing is reachable.
+    """
+    if not words:
+        return last_end
+    if cap_end <= float(words[0]["start"]):
+        return last_end
+
+    padding = max(0.0, float(padding_seconds))
+    last_sentence_end: Optional[float] = None
+    for i, word in enumerate(words):
+        word_end = float(word["end"])
+        if not word_ends_sentence(str(word.get("text", ""))):
+            continue
+        next_start = float(words[i + 1]["start"]) if i + 1 < len(words) else None
+        gap = (next_start - word_end) if next_start is not None else float("inf")
+        if gap >= silence_threshold:
+            return min(word_end + min(padding, gap), cap_end)
+        last_sentence_end = word_end
+
+    if last_sentence_end is not None:
+        return min(last_sentence_end + padding, cap_end)
+
+    last_word_end = max(float(word["end"]) for word in words)
+    return min(last_word_end, cap_end)
+
+
 def extend_keep_ranges_to_sentence_boundary(
     video_path: Path,
     keep_ranges: List[Tuple[float, float]],
     max_extension_seconds: float = CLIP_END_SENTENCE_EXTENSION_SECONDS,
     padding_seconds: float = CLIP_END_PADDING_SECONDS,
+    place_at_silence: bool = True,
 ) -> List[Tuple[float, float]]:
-    """Extend the final source range when a clip end lands mid-sentence."""
+    """Extend the final source range when a clip end lands mid-sentence.
+
+    Default parameters reproduce the historical behaviour; place_at_silence
+    moves the cut inside a breath gap after a sentence-ending word.
+    """
     normalized = normalize_source_ranges(keep_ranges)
     if not normalized:
         return []
@@ -1418,26 +1496,100 @@ def extend_keep_ranges_to_sentence_boundary(
     ):
         return normalized
 
-    extended_end = last_end
-    for word in nearby_words:
-        word_end = float(word["end"])
-        if word_end <= last_end + 0.05:
-            continue
-        extended_end = max(extended_end, word_end)
-        if word_ends_sentence(str(word.get("text", ""))):
-            extended_end += max(0.0, padding_seconds)
-            break
+    candidates = [
+        word for word in nearby_words if float(word["end"]) > last_end + 0.05
+    ]
+    # place_at_silence=False disables the breath-gap trim: only the infinite
+    # gap of a trailing word satisfies an infinite threshold, so the cut falls
+    # back to sentence-end + padding (historical behaviour).
+    extended_end = _pick_extended_end(
+        candidates,
+        last_end,
+        cap_end,
+        padding_seconds,
+        silence_threshold=0.25 if place_at_silence else float("inf"),
+    )
 
     if extended_end <= last_end:
         return normalized
-    if source_duration is not None:
-        extended_end = min(extended_end, source_duration)
-    extended_end = min(extended_end, cap_end + max(0.0, padding_seconds))
-
+    extended_end = min(extended_end, cap_end)
     if extended_end - last_start <= 0.05:
         return normalized
 
     return [*normalized[:-1], (last_start, extended_end)]
+
+
+def snap_keep_ranges_end_to_scene_cut(
+    keep_ranges: Optional[List[Tuple[float, float]]],
+    scene_cuts: Optional[List[float]],
+    max_snap_seconds: float = 1.0,
+) -> List[Tuple[float, float]]:
+    """Snap the final keep range's end forward to the nearest scene cut.
+
+    Only the last range is touched. A scene cut c qualifies when
+    end < c <= end + max_snap_seconds; the nearest such cut replaces the end.
+    A cut exactly at the end (c == end) never qualifies, so the end only ever
+    moves forward. Without a qualifying cut, or with empty/malformed inputs,
+    the ranges are returned unchanged.
+    """
+    if not keep_ranges or not scene_cuts:
+        return keep_ranges
+
+    normalized = normalize_source_ranges(keep_ranges)
+    if not normalized:
+        return keep_ranges
+
+    last_start, last_end = normalized[-1]
+    window_end = last_end + max(0.0, max_snap_seconds)
+    candidates = [
+        cut
+        for cut in scene_cuts
+        if isinstance(cut, (int, float)) and last_end < cut <= window_end
+    ]
+    if not candidates:
+        return keep_ranges
+
+    nearest_cut = min(candidates)
+    return [*normalized[:-1], (last_start, nearest_cut)]
+
+
+def snap_segment_end_to_sentence(
+    transcript_words: List[Dict[str, Any]],
+    end_seconds: float,
+    max_window_seconds: float = 3.0,
+) -> float:
+    """Snap a clip end forward to the end of the next complete sentence.
+
+    Returns the earliest sentence-ending word end at or after end_seconds whose
+    start falls within max_window_seconds of it. Returns end_seconds unchanged
+    when no such word exists: empty transcript, end already at a sentence
+    boundary, or no sentence closer inside the window.
+    """
+    if not transcript_words:
+        return end_seconds
+
+    try:
+        window_end = end_seconds + max_window_seconds
+    except TypeError:
+        return end_seconds
+
+    candidate_end = None
+    for word in transcript_words:
+        try:
+            word_start = float(word["start"])
+            word_end = float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (word_start <= window_end):
+            continue
+        if word_end < end_seconds:
+            continue
+        if not word_ends_sentence(str(word.get("text", ""))):
+            continue
+        if candidate_end is None or word_end < candidate_end:
+            candidate_end = word_end
+
+    return candidate_end if candidate_end is not None else end_seconds
 
 
 def _balance_title_lines(words: List[str], max_chars: int) -> List[str]:
@@ -1823,6 +1975,62 @@ def count_scene_cuts(video_path: Path, threshold: float = 0.35) -> int:
     return len(re.findall(r"pts_time:", result.stderr))
 
 
+def detect_scene_cuts_in_window(
+    video_path: Path,
+    start_seconds: float,
+    end_seconds: float,
+    scene_threshold: float = 0.4,
+) -> List[float]:
+    """Detect scene-cut timestamps inside [start_seconds, end_seconds].
+
+    Uses the same ffmpeg scene-score expression as count_scene_cuts but bounds
+    the decode to the window with input -ss/-t and rebases the timeline with
+    setpts=PTS-STARTPTS, so the showinfo offsets convert deterministically to
+    absolute timestamps (start_seconds + offset) regardless of container
+    timestamp conventions. Returns [] when the window is invalid, the video has
+    no readable video stream, or ffmpeg fails.
+    """
+    if start_seconds < 0 or end_seconds <= start_seconds:
+        return []
+    try:
+        width, height = ffprobe_video_size(video_path)
+    except Exception:
+        return []
+    if width <= 0 or height <= 0:
+        return []
+
+    duration = end_seconds - start_seconds
+    try:
+        result = run_ffmpeg_command(
+            [
+                "ffmpeg",
+                "-ss", str(start_seconds),
+                "-t", str(duration),
+                "-i", str(video_path),
+                "-filter:v",
+                f"setpts=PTS-STARTPTS,select='gt(scene,{scene_threshold})',showinfo",
+                "-f", "null",
+                "-",
+            ],
+            timeout=120,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+
+    cuts: List[float] = []
+    for timestamp in re.findall(r"pts_time:([0-9.]+)", result.stderr):
+        try:
+            offset = float(timestamp)
+        except ValueError:
+            continue
+        absolute = start_seconds + offset
+        if start_seconds - 0.25 <= absolute <= end_seconds:
+            cuts.append(absolute)
+    return cuts
+
+
 def parse_motion_metadata(path: Path) -> Tuple[List[float], List[float]]:
     times: List[float] = []
     values: List[float] = []
@@ -2094,6 +2302,65 @@ def detect_speaker_reframe_plan(
         return None
 
 
+def _region_area_frac(region: Dict[str, Any], frame_area: float) -> float:
+    """Estimated face-region area as a fraction of the source frame.
+
+    cluster_two_face_regions sizes each ROI box off the detected face bbox
+    (roi_w = 1.4 * face_side, roi_h = 0.9 * face_side), so the ROI box product
+    is a consistent stand-in for the face region when no raw face bbox is
+    carried. Missing or degenerate geometry degrades to 0.0 so the area gate
+    rejects it.
+    """
+    roi_w = int(region.get("roi_w") or 0)
+    roi_h = int(region.get("roi_h") or 0)
+    if frame_area <= 0 or roi_w <= 0 or roi_h <= 0:
+        return 0.0
+    return float(roi_w * roi_h) / frame_area
+
+
+def should_use_speaker_pan(
+    plan: Optional[Dict[str, Any]],
+    scene_cuts: Any,
+    area_threshold: float = 0.03,
+) -> bool:
+    """Whether the speaker-aware pan plan is worth using for the default mode.
+
+    Gates on the plan being a real 'pan' plan, the clip having at most two
+    scene cuts, and both face regions covering at least ``area_threshold`` of
+    the source frame. ``scene_cuts`` may be the raw cut-timestamp list (counted
+    via len) or a pre-computed integer count.
+
+    Area estimation: the plan may carry per-region geometry under ``regions``
+    (as ``vertical_split`` plans do). When both region dicts are present their
+    ROI boxes are compared against the threshold. ``detect_speaker_reframe_plan``
+    pan plans do not serialize ``regions`` today, so the area gate is not
+    evaluable there — the plan already implies two detected, separated faces,
+    and the gate is skipped rather than guessed.
+    """
+    if plan is None or plan.get("mode") != "pan":
+        return False
+    cut_count = (
+        len(scene_cuts) if isinstance(scene_cuts, (list, tuple)) else int(scene_cuts or 0)
+    )
+    if cut_count > 2:
+        return False
+
+    regions = plan.get("regions")
+    if not isinstance(regions, dict):
+        return True
+    left = regions.get("left")
+    right = regions.get("right")
+    width = plan.get("width") or 0
+    height = plan.get("height") or 0
+    if not (left and right and width > 0 and height > 0):
+        return False
+    frame_area = float(width * height)
+    return (
+        _region_area_frac(left, frame_area) >= area_threshold
+        and _region_area_frac(right, frame_area) >= area_threshold
+    )
+
+
 def compute_vertical_crop_dims(
     width: int, height: int, target_ratio: float = 9 / 16
 ) -> Tuple[int, int]:
@@ -2197,8 +2464,9 @@ def _scene_cuts_from_diffs(diffs: List[Tuple[float, float]]) -> List[float]:
 def analyze_vertical_clip(
     input_path: Path,
     *,
-    sample_fps: float = 3.0,
-    proc_width: int = 480,
+    sample_fps: float = 6.0,
+    proc_width: int = 640,
+    max_frames: int = 1500,
 ) -> Tuple[List[Tuple[float, Optional[float], float]], List[float]]:
     """Fast single-pass clip analysis: face track + scene cuts in one decode.
 
@@ -2207,6 +2475,11 @@ def analyze_vertical_clip(
     lightweight face detection. Scene cuts come from frame differences computed
     in the same pass. Returns (track, scene_cuts) where track entries are
     (t, center_x_in_source_px or None, area_frac).
+
+    Frame-budget guard: the total number of decoded frames is capped at
+    max_frames. The estimate (duration x sample_fps) is computed before the
+    decode, and when it exceeds the cap the effective sample_fps is scaled down
+    proportionally, so long videos never trigger unbounded frame processing.
     """
     width, height = ffprobe_video_size(input_path)
     if width <= 0 or height <= 0:
@@ -2214,6 +2487,18 @@ def analyze_vertical_clip(
     proc_w = round_to_even(min(proc_width, width))
     proc_h = round_to_even(max(2, int(round(proc_w * height / width))))
     frame_bytes = proc_w * proc_h * 3
+
+    # Frame-budget guard: back the sample rate off before decoding when
+    # duration x sample_fps would exceed the cap. ffmpeg's fps filter then emits
+    # roughly duration x sample_fps frames (one per idx -> t = idx/sample_fps).
+    try:
+        duration = ffprobe_duration(input_path)
+    except RuntimeError:
+        duration = 0.0
+    if duration > 0.0 and sample_fps > 0.0:
+        estimated_frames = duration * sample_fps
+        if estimated_frames > max_frames:
+            sample_fps = sample_fps * (max_frames / estimated_frames)
 
     command = [
         "ffmpeg", "-v", "error", "-an", "-sn",
@@ -2282,6 +2567,65 @@ def _median_filter(values: List[float], window: int = 3) -> List[float]:
     return out
 
 
+def compute_headroom_crop_x(
+    track: List[Tuple[float, Optional[float], float]],
+    width: int,
+    crop_w: int,
+    margin_frac: float = 0.18,
+) -> List[Tuple[float, float]]:
+    """Per-sample crop-x that keeps the estimated face bbox inside the crop.
+
+    For every detected face returns (t, crop_x) where crop_x is clamped to
+    [0, width - crop_w] and, when the face bbox (half-width estimated from
+    area_frac) plus a margin of margin_frac * crop_w can fit inside the crop,
+    that bbox+margin box stays inside. When bbox+margin cannot both fit (face
+    too wide for the crop), the bbox alone is kept inside; when even that is
+    impossible, the crop is simply centred on the face (best effort). Samples
+    with a missing detection are skipped. Returns [] when the crop has no
+    horizontal room or the track is empty.
+
+    The bbox half-width estimate assumes a square face box and a 16:9 source:
+    area_frac = face_w^2 / (W * 0.5625 * W), so
+    half_w = 0.5 * 0.75 * W * sqrt(area_frac) = 0.375 * W * sqrt(area_frac).
+    The estimate is only used to size the margin guard; the source aspect ratio
+    is not available at this call boundary.
+    """
+    max_x = max(0, width - crop_w)
+    if max_x <= 0 or not track:
+        return []
+    margin = margin_frac * crop_w
+
+    def pick_within(lower: float, upper: float, naive: float) -> float:
+        lo = max(0.0, lower)
+        hi = min(float(max_x), upper)
+        if lo <= hi:
+            return min(max(naive, lo), hi)
+        return min(max(naive, 0.0), float(max_x))
+
+    result: List[Tuple[float, float]] = []
+    for t, center_x, area_frac in track:
+        if center_x is None:
+            continue
+        half_w = 0.375 * width * math.sqrt(max(0.0, area_frac))
+        naive = min(max(center_x - crop_w / 2.0, 0.0), float(max_x))
+
+        # Constraint ranges: crop_x such that the box [center +/- half_w + margin]
+        # (then [center +/- half_w] without margin) stays inside the crop.
+        lower = center_x + half_w + margin - crop_w
+        upper = center_x - half_w - margin
+        if max(0.0, lower) <= min(float(max_x), upper):
+            crop_x = pick_within(lower, upper, naive)
+        else:
+            lower = center_x + half_w - crop_w
+            upper = center_x - half_w
+            if max(0.0, lower) <= min(float(max_x), upper):
+                crop_x = pick_within(lower, upper, naive)
+            else:
+                crop_x = naive
+        result.append((t, crop_x))
+    return result
+
+
 def build_crop_trajectory(
     track: List[Tuple[float, Optional[float], float]],
     width: int,
@@ -2290,6 +2634,7 @@ def build_crop_trajectory(
     deadzone_frac: float = 0.05,
     smooth_time: float = 0.9,
     max_pan_speed_frac: float = 0.4,
+    margin_frac: float = 0.18,
 ) -> List[Tuple[float, int]]:
     """Turn a raw face-centre track into a smooth, eased crop-x trajectory.
 
@@ -2299,6 +2644,12 @@ def build_crop_trajectory(
     and no mechanical ramp-then-stop feel. A deadzone keeps the frame still for
     small head movements; a median pre-filter removes detection spikes. Returns
     [] when there isn't enough signal to track.
+
+    Headroom: the comfort targets come from compute_headroom_crop_x, so each
+    crop position keeps the estimated face bbox (plus margin_frac * crop_w of
+    margin) inside the crop instead of only centring the face centre. The easing
+    slack (deadzone + max_speed) is far smaller than the margin, so the eased
+    output stays within the headroom box.
     """
     if not track:
         return []
@@ -2307,6 +2658,7 @@ def build_crop_trajectory(
         return []
 
     centers: List[Optional[float]] = [c for _, c, _ in track]
+    areas = [a for _, _, a in track]
     times = [t for t, _, _ in track]
     detected = sum(1 for c in centers if c is not None)
     if detected < max(3, len(centers) // 5):
@@ -2328,7 +2680,14 @@ def build_crop_trajectory(
     if any(c is None for c in centers):
         return []
 
-    desired = [min(max(c - crop_w / 2.0, 0.0), float(max_x)) for c in centers]
+    # Headroom: build the desired crop-x per sample from the face-bbox-aware
+    # helper. After gap-fill every centre is non-None, so the helper returns one
+    # entry per sample in the same order.
+    rebuilt = [(times[i], centers[i], areas[i]) for i in range(len(centers))]
+    headroom = compute_headroom_crop_x(
+        rebuilt, width, crop_w, margin_frac=margin_frac
+    )
+    desired = [x for _, x in headroom]
     desired = _median_filter(desired, window=3)
 
     deadzone = max(2.0, crop_w * deadzone_frac)
@@ -2618,6 +2977,20 @@ def build_vertical_filter_plan(
         logger.warning("Clip analysis failed (%s); using static crop", exc)
         track, scene_cuts = [], []
 
+    # Auto speaker-pan for two-face clips: the pan plan beats the tracked crop
+    # when both faces are real speakers, and is only probed on short-cut clips
+    # so the extra face/motion analysis stays cheap. Falls back to the regular
+    # scene-aware layout when the plan does not qualify.
+    if len(scene_cuts) <= 2:
+        pan_plan = detect_speaker_reframe_plan(input_path, "vertical_pan")
+        if should_use_speaker_pan(pan_plan, scene_cuts):
+            return (
+                f"crop={pan_plan['crop_w']}:{pan_plan['crop_h']}:"
+                f"x='{pan_plan['x_expression']}':y=0,"
+                "scale=1080:1920:flags=lanczos,setsar=1",
+                "vf",
+            )
+
     keys = build_crop_trajectory(track, width, crop_w) if track else []
     moving = bool(keys and trajectory_has_movement(keys, crop_w))
     static_x = 0
@@ -2684,6 +3057,14 @@ def render_reframed_clip_ffmpeg(
         else None
     )
     audio_args = build_audio_output_args(has_audio)
+    try:
+        duration = ffprobe_duration(input_path)
+    except Exception:
+        duration = None
+    fade_args = build_fade_out_args(duration) if duration is not None else None
+    audio_fade_args = (
+        ["-af", fade_args[1]] if fade_args is not None and has_audio else []
+    )
 
     if output_format == "original":
         out_w, out_h = round_to_even(width), round_to_even(height)
@@ -2709,7 +3090,15 @@ def render_reframed_clip_ffmpeg(
     if plan and plan["mode"] == "split":
         left = plan["regions"]["left"]
         right = plan["regions"]["right"]
-        vstack_tail = f",{subs}" if subs else ""
+        video_fade_fragment = fade_args[0] if fade_args else None
+        if subs and video_fade_fragment:
+            vstack_tail = f",{video_fade_fragment},{subs}"
+        elif video_fade_fragment:
+            vstack_tail = f",{video_fade_fragment}"
+        elif subs:
+            vstack_tail = f",{subs}"
+        else:
+            vstack_tail = ""
         video_filter = (
             f"[0:v]split=2[l][r];"
             f"[l]crop={left['tile_w']}:{left['tile_h']}:{left['tile_x']}:{left['tile_y']},"
@@ -2724,6 +3113,7 @@ def render_reframed_clip_ffmpeg(
             "-map", "[v]", "-map", "0:a?",
             *build_final_video_encode_args(),
             *audio_args,
+            *audio_fade_args,
             "-movflags", "+faststart",
             str(output_path),
         ]
@@ -2736,11 +3126,14 @@ def render_reframed_clip_ffmpeg(
         )
         if subs:
             video_filter = f"{video_filter},{subs}"
+        if fade_args:
+            video_filter = f"{video_filter},{fade_args[0]}"
         command = [
             "ffmpeg", "-y", "-i", str(input_path),
             "-vf", video_filter,
             *build_final_video_encode_args(),
             *audio_args,
+            *audio_fade_args,
             "-movflags", "+faststart",
             str(output_path),
         ]
@@ -2750,7 +3143,14 @@ def render_reframed_clip_ffmpeg(
     # background full-frame fit for content shots (tweets/graphs/slides).
     video_filter, mode = build_vertical_filter_plan(input_path, width, height)
     if mode == "complex":
-        if subs:
+        if fade_args:
+            video_fade_fragment = fade_args[0]
+            if subs:
+                graph = f"{video_filter};[vout]{subs},{video_fade_fragment}[v]"
+            else:
+                graph = f"{video_filter};[vout]{video_fade_fragment}[v]"
+            map_label = "[v]"
+        elif subs:
             graph = f"{video_filter};[vout]{subs}[v]"
             map_label = "[v]"
         else:
@@ -2762,6 +3162,7 @@ def render_reframed_clip_ffmpeg(
             "-map", map_label, "-map", "0:a?",
             *build_final_video_encode_args(),
             *audio_args,
+            *audio_fade_args,
             "-movflags", "+faststart",
             str(output_path),
         ]
@@ -2769,11 +3170,14 @@ def render_reframed_clip_ffmpeg(
 
     if subs:
         video_filter = f"{video_filter},{subs}"
+    if fade_args:
+        video_filter = f"{video_filter},{fade_args[0]}"
     command = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-vf", video_filter,
         *build_final_video_encode_args(),
         *audio_args,
+        *audio_fade_args,
         "-movflags", "+faststart",
         str(output_path),
     ]
@@ -3285,10 +3689,46 @@ def create_optimized_clip(
                 for start, end in [(start_time, end_time)]
                 if min(end_time, end) - max(start_time, start) > 0.05
             ]
+        pre_extension_end = (
+            effective_keep_ranges[-1][1] if effective_keep_ranges else None
+        )
         effective_keep_ranges = extend_keep_ranges_to_sentence_boundary(
             video_path,
             effective_keep_ranges,
+            max_extension_seconds=8.0,
         )
+        # Scene-cut snap (DP-6): only when the sentence-boundary extension
+        # actually moved the end, pull it forward to the nearest scene cut
+        # instead of stopping mid-scene. Detection failure degrades silently to
+        # the sentence-boundary end.
+        if (
+            pre_extension_end is not None
+            and effective_keep_ranges
+            and effective_keep_ranges[-1][1] > pre_extension_end
+        ):
+            try:
+                scene_cuts = detect_scene_cuts_in_window(
+                    video_path,
+                    effective_keep_ranges[-1][0],
+                    effective_keep_ranges[-1][1] + 1.5,
+                )
+                snapped_ranges = snap_keep_ranges_end_to_scene_cut(
+                    effective_keep_ranges,
+                    scene_cuts,
+                    max_snap_seconds=1.0,
+                )
+                if snapped_ranges != effective_keep_ranges:
+                    logger.info(
+                        "Snapped clip end to scene cut: %.2fs -> %.2fs",
+                        effective_keep_ranges[-1][1],
+                        snapped_ranges[-1][1],
+                    )
+                effective_keep_ranges = snapped_ranges
+            except Exception as exc:
+                logger.warning(
+                    "Scene-cut snap skipped (%s); keeping sentence-boundary end",
+                    exc,
+                )
         duration = sum(end - start for start, end in effective_keep_ranges)
         if duration <= 0:
             logger.error(f"Invalid clip duration: {duration:.1f}s")

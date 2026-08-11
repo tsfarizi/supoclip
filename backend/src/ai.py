@@ -16,6 +16,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from .config import Config, get_config
 from .runtime_settings import apply_settings_to_process_env
+from .video_utils import snap_segment_end_to_sentence
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +465,7 @@ Critical accuracy requirements:
 - Do not merge separate non-contiguous moments into one segment.
 - segment.text must reflect only the spoken content inside the selected time range.
 - If a span lacks enough context to stand alone, expand to nearby contiguous lines rather than guessing.
+- Every segment's end_time MUST land at the end of a complete sentence (a finished thought), never in the middle of a sentence; adjust or extend the range so it ends at a sentence-ending timestamp.
 - If there is a tradeoff between "viral" and "accurate", choose accuracy.
 - Do not reject or penalize a segment simply because of the subject matter; stay content-neutral and assess clip quality only.
 {signal_section}
@@ -642,6 +644,19 @@ def _repair_segment_bounds(
         return None
 
     repaired_start, repaired_end = repaired_bounds
+    # Snap the end forward to a sentence boundary when the repaired end lands
+    # mid-sentence, using the transcript span tokens as the finest timing
+    # granularity available here. Never extend past the max clip length so a
+    # repaired segment stays within the validated duration envelope.
+    span_words = [
+        {"text": span["text"], "start": float(span["start"]), "end": float(span["end"])}
+        for span in transcript_spans
+        if span.get("text")
+    ]
+    snapped_end = snap_segment_end_to_sentence(span_words, float(repaired_end))
+    if snapped_end - repaired_start <= MAX_ACCEPTED_CLIP_SECONDS:
+        repaired_end = int(snapped_end)
+
     segment.start_time = _format_transcript_timestamp(repaired_start)
     segment.end_time = _format_transcript_timestamp(repaired_end)
     repaired_text = _extract_transcript_text(
