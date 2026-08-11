@@ -7,6 +7,8 @@ from sqlalchemy import text as sa_text
 from typing import List, Dict, Any, Optional
 import logging
 
+from ..models import generate_uuid_string
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,66 +37,45 @@ class ClipRepository:
         hook_title: Optional[str] = None,
     ) -> str:
         """Create a new clip record and return its ID."""
-        try:
-            result = await db.execute(
-                sa_text("""
-                    INSERT INTO generated_clips
-                    (task_id, filename, file_path, start_time, end_time, duration,
-                     text, relevance_score, reasoning, clip_order,
-                     virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                     hook_title, created_at)
-                    VALUES
-                    (:task_id, :filename, :file_path, :start_time, :end_time, :duration,
-                     :text, :relevance_score, :reasoning, :clip_order,
-                     :virality_score, :hook_score, :engagement_score, :value_score, :shareability_score, :hook_type,
-                     :hook_title, NOW())
-                    RETURNING id
-                """),
-                {
-                    "task_id": task_id,
-                    "filename": filename,
-                    "file_path": file_path,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "duration": duration,
-                    "text": text,
-                    "relevance_score": relevance_score,
-                    "reasoning": reasoning,
-                    "clip_order": clip_order,
-                    "virality_score": virality_score,
-                    "hook_score": hook_score,
-                    "engagement_score": engagement_score,
-                    "value_score": value_score,
-                    "shareability_score": shareability_score,
-                    "hook_type": hook_type,
-                    "hook_title": hook_title,
-                },
-            )
-        except Exception:
-            await db.rollback()
-            result = await db.execute(
-                sa_text("""
-                    INSERT INTO generated_clips
-                    (task_id, filename, file_path, start_time, end_time, duration,
-                     text, relevance_score, reasoning, clip_order, created_at)
-                    VALUES
-                    (:task_id, :filename, :file_path, :start_time, :end_time, :duration,
-                     :text, :relevance_score, :reasoning, :clip_order, NOW())
-                    RETURNING id
-                """),
-                {
-                    "task_id": task_id,
-                    "filename": filename,
-                    "file_path": file_path,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "duration": duration,
-                    "text": text,
-                    "relevance_score": relevance_score,
-                    "reasoning": reasoning,
-                    "clip_order": clip_order,
-                },
-            )
+        clip_id = generate_uuid_string()
+        # B3 fallback removed: single INSERT with explicit id and hook columns,
+        # fail-loud on any DB error; commits here to mirror TaskRepository.create_task.
+        result = await db.execute(
+            sa_text("""
+                INSERT INTO generated_clips
+                (id, task_id, filename, file_path, start_time, end_time, duration,
+                 text, relevance_score, reasoning, clip_order,
+                 virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
+                 hook_title, created_at)
+                VALUES
+                (:clip_id, :task_id, :filename, :file_path, :start_time, :end_time, :duration,
+                 :text, :relevance_score, :reasoning, :clip_order,
+                 :virality_score, :hook_score, :engagement_score, :value_score, :shareability_score, :hook_type,
+                 :hook_title, NOW())
+                RETURNING id
+            """),
+            {
+                "clip_id": clip_id,
+                "task_id": task_id,
+                "filename": filename,
+                "file_path": file_path,
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration": duration,
+                "text": text,
+                "relevance_score": relevance_score,
+                "reasoning": reasoning,
+                "clip_order": clip_order,
+                "virality_score": virality_score,
+                "hook_score": hook_score,
+                "engagement_score": engagement_score,
+                "value_score": value_score,
+                "shareability_score": shareability_score,
+                "hook_type": hook_type,
+                "hook_title": hook_title,
+            },
+        )
+        await db.commit()
         clip_id = result.scalar()
         if not clip_id:
             raise RuntimeError("Failed to create clip: no ID returned")
@@ -104,31 +85,19 @@ class ClipRepository:
     @staticmethod
     async def get_clips_by_task(db: AsyncSession, task_id: str) -> List[Dict[str, Any]]:
         """Get all clips for a specific task, ordered by clip_order."""
-        try:
-            result = await db.execute(
-                sa_text("""
-                    SELECT id, filename, file_path, start_time, end_time, duration,
-                           text, relevance_score, reasoning, clip_order, created_at,
-                           virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                           hook_title
-                    FROM generated_clips
-                    WHERE task_id = :task_id
-                    ORDER BY clip_order ASC
-                """),
-                {"task_id": task_id},
-            )
-        except Exception:
-            await db.rollback()
-            result = await db.execute(
-                sa_text("""
-                    SELECT id, filename, file_path, start_time, end_time, duration,
-                           text, relevance_score, reasoning, clip_order, created_at
-                    FROM generated_clips
-                    WHERE task_id = :task_id
-                    ORDER BY clip_order ASC
-                """),
-                {"task_id": task_id},
-            )
+        # B3 fallback removed: single SELECT including hook_title, fail-loud on any DB error.
+        result = await db.execute(
+            sa_text("""
+                SELECT id, filename, file_path, start_time, end_time, duration,
+                       text, relevance_score, reasoning, clip_order, created_at,
+                       virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
+                       hook_title
+                FROM generated_clips
+                WHERE task_id = :task_id
+                ORDER BY clip_order ASC
+            """),
+            {"task_id": task_id},
+        )
 
         clips = []
         for row in result.fetchall():
@@ -152,7 +121,7 @@ class ClipRepository:
                     "value_score": row.value_score or 0,
                     "shareability_score": row.shareability_score or 0,
                     "hook_type": row.hook_type,
-                    "hook_title": getattr(row, "hook_title", None),
+                    "hook_title": row.hook_title,
                 }
             )
 
@@ -196,33 +165,20 @@ class ClipRepository:
         db: AsyncSession, clip_id: str
     ) -> Optional[Dict[str, Any]]:
         """Get one clip by ID."""
-        try:
-            result = await db.execute(
-                sa_text(
-                    """
-                    SELECT id, task_id, filename, file_path, start_time, end_time, duration,
-                           text, relevance_score, reasoning, clip_order,
-                           virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                           hook_title, created_at
-                    FROM generated_clips
-                    WHERE id = :clip_id
-                    """
-                ),
-                {"clip_id": clip_id},
-            )
-        except Exception:
-            await db.rollback()
-            result = await db.execute(
-                sa_text(
-                    """
-                    SELECT id, task_id, filename, file_path, start_time, end_time, duration,
-                           text, relevance_score, reasoning, clip_order, created_at
-                    FROM generated_clips
-                    WHERE id = :clip_id
-                    """
-                ),
-                {"clip_id": clip_id},
-            )
+        # B3 fallback removed: single SELECT including hook_title, fail-loud on any DB error.
+        result = await db.execute(
+            sa_text(
+                """
+                SELECT id, task_id, filename, file_path, start_time, end_time, duration,
+                       text, relevance_score, reasoning, clip_order,
+                       virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
+                       hook_title, created_at
+                FROM generated_clips
+                WHERE id = :clip_id
+                """
+            ),
+            {"clip_id": clip_id},
+        )
         row = result.fetchone()
         if not row:
             return None
@@ -245,7 +201,7 @@ class ClipRepository:
             "value_score": row.value_score or 0,
             "shareability_score": row.shareability_score or 0,
             "hook_type": row.hook_type,
-            "hook_title": getattr(row, "hook_title", None),
+            "hook_title": row.hook_title,
             "created_at": row.created_at.isoformat(),
             "video_url": f"/tasks/{row.task_id}/clips/{row.id}/file",
         }

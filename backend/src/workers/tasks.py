@@ -6,11 +6,44 @@ import logging
 from typing import Dict, Any, Optional
 import json
 
+from arq import cron
+
 from ..observability import configure_logging, set_trace_id
 
 configure_logging()
 
 logger = logging.getLogger(__name__)
+
+
+async def sweep_stale_queued_tasks(ctx: Dict[str, Any]) -> int:
+    """Recovery sweep: mark queued tasks that outlived the timeout as error.
+
+    GET /tasks/{id} must stay read-only, so the stale-queued transition lives
+    here instead of on the read path. Runs on a cron schedule; each task row
+    is committed individually via update_task_status.
+    """
+    from ..database import AsyncSessionLocal
+    from ..runtime_settings import load_runtime_settings_cache
+    from ..repositories.task_repository import TaskRepository
+    from ..services.task_service import QUEUED_TASK_TIMEOUT_MESSAGE, TaskService
+
+    async with AsyncSessionLocal() as db:
+        await load_runtime_settings_cache(db)
+        task_service = TaskService(db)
+        stale_count = 0
+        for task in await TaskRepository.get_queued_tasks(db):
+            if task_service._is_stale_queued_task(task):
+                await task_service.task_repo.update_task_status(
+                    db,
+                    task["id"],
+                    "error",
+                    progress=0,
+                    progress_message=QUEUED_TASK_TIMEOUT_MESSAGE,
+                )
+                stale_count += 1
+        if stale_count:
+            logger.warning("Marked %d stale queued task(s) as error", stale_count)
+        return stale_count
 
 
 async def process_video_task(
@@ -144,4 +177,4 @@ class WorkerSettings:
 
     # Worker pool settings
     max_jobs = 4  # Process up to 4 jobs simultaneously
-    cron_jobs = []
+    cron_jobs = [cron(sweep_stale_queued_tasks, minute=0)]

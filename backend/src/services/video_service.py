@@ -35,6 +35,7 @@ from ..clip_source_map import (
 )
 from ..ai import get_most_relevant_parts_by_transcript
 from ..config import get_config
+from ..errors import CancelledError, DownloadError
 
 logger = logging.getLogger(__name__)
 UPLOAD_URL_PREFIX = "upload://"
@@ -453,7 +454,7 @@ class VideoService:
             runtime_config = get_config()
             # Step 1: Get video path (download or use existing)
             if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
+                raise CancelledError("Task cancelled")
 
             if progress_callback:
                 await progress_callback(10, "Downloading video...", "processing")
@@ -464,31 +465,31 @@ class VideoService:
                     duration = video_info.get("duration", 0)
                     if duration and duration > runtime_config.max_video_duration:
                         mins = runtime_config.max_video_duration // 60
-                        raise Exception(
+                        raise DownloadError(
                             f"Video is too long ({duration // 60} min). "
                             f"Maximum allowed duration is {mins} minutes."
                         )
 
                 video_path = await VideoService.download_video(url, task_id=task_id)
                 if not video_path:
-                    raise Exception("Failed to download video")
+                    raise DownloadError("Failed to download video")
             else:
                 video_path = VideoService.resolve_local_video_path(url)
                 if not video_path.exists():
-                    raise Exception("Video file not found")
+                    raise DownloadError("Video file not found")
 
             # Post-download duration guard (catches cases where preflight info was unavailable)
             file_duration = VideoService._get_file_duration(video_path)
             if file_duration and file_duration > runtime_config.max_video_duration:
                 mins = runtime_config.max_video_duration // 60
-                raise Exception(
+                raise DownloadError(
                     f"Video is too long ({int(file_duration) // 60} min). "
                     f"Maximum allowed duration is {mins} minutes."
                 )
 
             # Step 2: Generate transcript
             if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
+                raise CancelledError("Task cancelled")
 
             if progress_callback:
                 await progress_callback(30, "Generating transcript...", "processing")
@@ -501,7 +502,7 @@ class VideoService:
 
             # Step 3: AI analysis
             if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
+                raise CancelledError("Task cancelled")
 
             if progress_callback:
                 await progress_callback(
@@ -561,7 +562,7 @@ class VideoService:
 
             # Step 4: Create clips
             if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
+                raise CancelledError("Task cancelled")
 
             if progress_callback:
                 await progress_callback(70, "Creating video clips...", "processing")

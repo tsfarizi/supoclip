@@ -74,6 +74,9 @@ def create_app(
             logger.info("🛑 Shutting down SupoClip API...")
             await close_db()
             await queue_adapter.close_pool()
+            from .infra.redis_client import close_redis_clients
+
+            await close_redis_clients()
             logger.info("✅ Cleanup complete")
 
     app = FastAPI(

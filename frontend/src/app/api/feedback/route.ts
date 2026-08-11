@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { buildBackendAuthHeaders } from "@/lib/backend-auth";
+import { getBackendApiBaseUrl } from "@/server/backend-api";
 
 export async function POST(request: Request) {
   const session = await auth.api.getSession({ headers: await headers() });
@@ -11,10 +12,7 @@ export async function POST(request: Request) {
   }
 
   const payload = await request.text();
-  const apiUrl =
-    process.env.BACKEND_INTERNAL_URL ||
-    process.env.NEXT_PUBLIC_API_URL ||
-    "http://localhost:8000";
+  const apiUrl = getBackendApiBaseUrl();
 
   const upstream = await fetch(`${apiUrl}/feedback`, {
     method: "POST",

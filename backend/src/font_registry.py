@@ -84,7 +84,7 @@ def find_font_path(
     allow_all_user_fonts: bool = False,
 ) -> Path | None:
     requested = font_name.strip()
-    if not requested:
+    if not requested or Path(requested).name != requested:
         return None
 
     search_dirs = [FONTS_DIR]

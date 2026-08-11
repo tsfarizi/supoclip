@@ -1,14 +1,17 @@
 import { POST } from "./route";
 import { fetchBackend } from "@/server/backend-api";
-import { getPrismaClient } from "@/server/prisma";
+import prisma from "@/lib/prisma";
 import { getServerStripeClient } from "@/server/stripe";
 
 vi.mock("@/lib/monetization", () => ({
   monetizationEnabled: true,
 }));
 
-vi.mock("@/server/prisma", () => ({
-  getPrismaClient: vi.fn(),
+vi.mock("@/lib/prisma", () => ({
+  default: {
+    user: { findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    stripeWebhookEvent: { create: vi.fn(), delete: vi.fn() },
+  },
 }));
 
 vi.mock("@/server/stripe", () => ({
@@ -56,11 +59,7 @@ describe("/api/billing/webhook", () => {
     };
 
     vi.mocked(getServerStripeClient).mockReturnValue(stripe as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      stripeWebhookEvent: {
-        create: vi.fn().mockRejectedValue({ code: "P2002" }),
-      },
-    } as never);
+    vi.mocked(prisma.stripeWebhookEvent.create).mockRejectedValue({ code: "P2002" });
 
     const response = await POST(
       new Request("http://localhost/api/billing/webhook", {
@@ -75,8 +74,10 @@ describe("/api/billing/webhook", () => {
   });
 
   it("notifies the backend when a subscription is deleted", async () => {
-    const deleteEvent = vi.fn().mockResolvedValue({});
-    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const deleteEvent = vi.mocked(prisma.stripeWebhookEvent.delete);
+    deleteEvent.mockResolvedValue({});
+    const updateMany = vi.mocked(prisma.user.updateMany);
+    updateMany.mockResolvedValue({ count: 1 });
     const stripe = {
       webhooks: {
         constructEvent: vi.fn().mockReturnValue({
@@ -92,15 +93,10 @@ describe("/api/billing/webhook", () => {
     };
 
     vi.mocked(getServerStripeClient).mockReturnValue(stripe as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      stripeWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: deleteEvent,
-      },
-      user: {
-        findFirst: vi.fn().mockResolvedValue({ id: "user-1", subscription_provider: "stripe" }),
-        updateMany,
-      },
+    vi.mocked(prisma.stripeWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.user.findFirst).mockResolvedValue({
+      id: "user-1",
+      subscription_provider: "stripe",
     } as never);
     vi.mocked(fetchBackend).mockResolvedValue(new Response("{}", { status: 200 }));
 
@@ -131,7 +127,8 @@ describe("/api/billing/webhook", () => {
   });
 
   it("acknowledges subscription deletions even when backend email delivery fails", async () => {
-    const deleteEvent = vi.fn().mockResolvedValue({});
+    const deleteEvent = vi.mocked(prisma.stripeWebhookEvent.delete);
+    deleteEvent.mockResolvedValue({});
     const stripe = {
       webhooks: {
         constructEvent: vi.fn().mockReturnValue({
@@ -147,16 +144,12 @@ describe("/api/billing/webhook", () => {
     };
 
     vi.mocked(getServerStripeClient).mockReturnValue(stripe as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      stripeWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: deleteEvent,
-      },
-      user: {
-        findFirst: vi.fn().mockResolvedValue({ id: "user-1", subscription_provider: "stripe" }),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
+    vi.mocked(prisma.stripeWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.user.findFirst).mockResolvedValue({
+      id: "user-1",
+      subscription_provider: "stripe",
     } as never);
+    vi.mocked(prisma.user.updateMany).mockResolvedValue({ count: 1 });
     vi.mocked(fetchBackend).mockResolvedValue(
       new Response("email service unavailable", { status: 503 }),
     );
@@ -192,16 +185,13 @@ describe("/api/billing/webhook", () => {
     };
 
     vi.mocked(getServerStripeClient).mockReturnValue(stripe as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      stripeWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        findFirst: vi.fn().mockResolvedValue({ id: "user-1", subscription_provider: "apple" }),
-        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
-      },
+    vi.mocked(prisma.stripeWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.stripeWebhookEvent.delete).mockResolvedValue({});
+    vi.mocked(prisma.user.findFirst).mockResolvedValue({
+      id: "user-1",
+      subscription_provider: "apple",
     } as never);
+    vi.mocked(prisma.user.updateMany).mockResolvedValue({ count: 0 });
 
     const response = await POST(
       new Request("http://localhost/api/billing/webhook", {
@@ -216,7 +206,8 @@ describe("/api/billing/webhook", () => {
   });
 
   it("maps subscription updates to the Scale plan by Stripe price ID", async () => {
-    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const updateMany = vi.mocked(prisma.user.updateMany);
+    updateMany.mockResolvedValue({ count: 1 });
     const stripe = {
       webhooks: {
         constructEvent: vi.fn().mockReturnValue({
@@ -244,15 +235,8 @@ describe("/api/billing/webhook", () => {
     };
 
     vi.mocked(getServerStripeClient).mockReturnValue(stripe as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      stripeWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        updateMany,
-      },
-    } as never);
+    vi.mocked(prisma.stripeWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.stripeWebhookEvent.delete).mockResolvedValue({});
 
     const response = await POST(
       new Request("http://localhost/api/billing/webhook", {
@@ -276,7 +260,8 @@ describe("/api/billing/webhook", () => {
   });
 
   it("scopes non-paid subscription updates so they cannot clobber an Apple entitlement", async () => {
-    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const updateMany = vi.mocked(prisma.user.updateMany);
+    updateMany.mockResolvedValue({ count: 0 });
     const stripe = {
       webhooks: {
         constructEvent: vi.fn().mockReturnValue({
@@ -296,15 +281,8 @@ describe("/api/billing/webhook", () => {
     };
 
     vi.mocked(getServerStripeClient).mockReturnValue(stripe as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      stripeWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        updateMany,
-      },
-    } as never);
+    vi.mocked(prisma.stripeWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.stripeWebhookEvent.delete).mockResolvedValue({});
 
     const response = await POST(
       new Request("http://localhost/api/billing/webhook", {
@@ -326,7 +304,8 @@ describe("/api/billing/webhook", () => {
   });
 
   it("scopes active subscriptions with unmapped prices so they cannot clobber an Apple entitlement", async () => {
-    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const updateMany = vi.mocked(prisma.user.updateMany);
+    updateMany.mockResolvedValue({ count: 0 });
     const stripe = {
       webhooks: {
         constructEvent: vi.fn().mockReturnValue({
@@ -354,15 +333,8 @@ describe("/api/billing/webhook", () => {
     };
 
     vi.mocked(getServerStripeClient).mockReturnValue(stripe as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      stripeWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        updateMany,
-      },
-    } as never);
+    vi.mocked(prisma.stripeWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.stripeWebhookEvent.delete).mockResolvedValue({});
 
     const response = await POST(
       new Request("http://localhost/api/billing/webhook", {

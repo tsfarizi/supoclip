@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { buildBackendAuthHeaders } from "@/lib/backend-auth";
+import { getBackendApiBaseUrl } from "@/server/backend-api";
 
 export async function GET() {
   const session = await auth.api.getSession({ headers: await headers() });
@@ -10,10 +11,7 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const apiUrl =
-    process.env.BACKEND_INTERNAL_URL ||
-    process.env.NEXT_PUBLIC_API_URL ||
-    "http://localhost:8000";
+  const apiUrl = getBackendApiBaseUrl();
   const upstream = await fetch(`${apiUrl}/tasks/billing/summary`, {
     method: "GET",
     headers: buildBackendAuthHeaders(session.user.id),

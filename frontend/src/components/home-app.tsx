@@ -16,6 +16,7 @@ import { formatBillingPlanName, isPaidBillingPlan } from "@/lib/billing-plans";
 import { track } from "@/lib/datafast";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import { buildFontOptionsPayload, FONT_SIZE_OPTIONS, FONT_TEMPLATE_DEFAULT_VALUE } from "@/lib/font-options";
+import { normalizeVideoIdentity } from "@/lib/video-identity";
 import Link from "next/link";
 import Image from "next/image";
 import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, Paintbrush, Film, Sparkles, Upload, Monitor, Menu, X, LogOut, List, Shield, Settings } from "lucide-react";
@@ -41,18 +42,6 @@ const ACTIVE_TASK_STATUSES = [
   "analyzing",
   "generating_clips",
 ];
-
-// Mirrors backend normalize_video_identity: YouTube links collapse to the
-// video id, everything else is compared verbatim.
-const normalizeVideoIdentity = (value: string): string => {
-  const v = (value || "").trim();
-  if (!v) return "";
-  const match = v.match(
-    /(?:youtu\.be\/|youtube\.com\/watch\?v=)([A-Za-z0-9_-]{6,})/
-  );
-  if (match) return `youtube:${match[1]}`;
-  return v;
-};
 
 interface BillingSummary {
   monetization_enabled: boolean;

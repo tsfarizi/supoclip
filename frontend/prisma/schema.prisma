@@ -89,6 +89,17 @@ model Task {
   caption_template     String?   @default("default") @db.VarChar(50)
   include_broll        Boolean?  @default(false)
 
+  // Pipeline fields (Schema v2, selaras dengan init.sql & models.py)
+  processing_mode      String    @default("fast") @db.VarChar(20)
+  started_at           DateTime? @db.Timestamptz
+  completed_at         DateTime? @db.Timestamptz
+  cache_hit            Boolean   @default(false)
+  error_code           String?   @db.VarChar(80)
+  stage_timings_json   String?
+  output_format        String    @default("vertical") @db.VarChar(20)
+  add_subtitles        Boolean   @default(true)
+  cleanup_settings_json Json?
+
   created_at           DateTime  @default(now()) @db.Timestamptz
   updated_at           DateTime  @default(now()) @updatedAt @db.Timestamptz
 

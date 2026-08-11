@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { NextResponse } from "next/server";
 import { buildBackendAuthHeaders } from "@/lib/backend-auth";
 import { fetchBackend } from "@/server/backend-api";
-import { getPrismaClient } from "@/server/prisma";
+import prisma from "@/lib/prisma";
 
 type SubscriptionEmailEvent = "subscribed" | "unsubscribed";
 type BillingPlan = "pro" | "scale";
@@ -131,7 +131,7 @@ async function resolveUserId(
     : [appUserId];
 
   for (const candidate of candidates) {
-    const user = await getPrismaClient().user.findUnique({
+    const user = await prisma.user.findUnique({
       where: { id: candidate },
       select: { id: true },
     });
@@ -194,7 +194,7 @@ async function grantAppleSubscription(userId: string, event: RevenueCatEvent) {
 
   const isTrial = event.period_type === "TRIAL";
   const expiration = toDate(event.expiration_at_ms);
-  await getPrismaClient().user.update({
+  await prisma.user.update({
     where: { id: userId },
     data: {
       plan,
@@ -220,7 +220,7 @@ async function downgradeAppleSubscription(userId: string, eventExpiration?: Date
         ],
       }
     : {};
-  const result = await getPrismaClient().user.updateMany({
+  const result = await prisma.user.updateMany({
     where: {
       id: userId,
       subscription_provider: "apple",
@@ -244,7 +244,7 @@ async function downgradeAppleSubscription(userId: string, eventExpiration?: Date
 async function handleBillingIssue(userId: string, event: RevenueCatEvent) {
   const gracePeriodEnd = toDate(event.grace_period_expiration_at_ms);
   if (gracePeriodEnd && gracePeriodEnd.getTime() > Date.now()) {
-    await getPrismaClient().user.updateMany({
+    await prisma.user.updateMany({
       where: {
         id: userId,
         subscription_provider: "apple",
@@ -256,7 +256,7 @@ async function handleBillingIssue(userId: string, event: RevenueCatEvent) {
     return;
   }
 
-  await getPrismaClient().user.updateMany({
+  await prisma.user.updateMany({
     where: {
       id: userId,
       subscription_provider: "apple",
@@ -357,7 +357,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    await getPrismaClient().revenueCatWebhookEvent.create({
+    await prisma.revenueCatWebhookEvent.create({
       data: {
         id: event.id,
         type: event.type,
@@ -374,7 +374,7 @@ export async function POST(request: Request) {
   try {
     await handleRevenueCatEvent(event);
   } catch (error) {
-    await getPrismaClient()
+    await prisma
       .revenueCatWebhookEvent.delete({ where: { id: event.id } })
       .catch(() => {});
     console.error("RevenueCat webhook handler failed", { eventId: event.id, error });

@@ -1,9 +1,12 @@
 import { POST } from "./route";
 import { fetchBackend } from "@/server/backend-api";
-import { getPrismaClient } from "@/server/prisma";
+import prisma from "@/lib/prisma";
 
-vi.mock("@/server/prisma", () => ({
-  getPrismaClient: vi.fn(),
+vi.mock("@/lib/prisma", () => ({
+  default: {
+    user: { findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    revenueCatWebhookEvent: { create: vi.fn(), delete: vi.fn() },
+  },
 }));
 
 vi.mock("@/server/backend-api", () => ({
@@ -60,15 +63,8 @@ describe("/api/billing/revenuecat-webhook", () => {
   );
 
   it("treats duplicate event IDs as idempotent without side effects", async () => {
-    const update = vi.fn();
-    vi.mocked(getPrismaClient).mockReturnValue({
-      revenueCatWebhookEvent: {
-        create: vi.fn().mockRejectedValue({ code: "P2002" }),
-      },
-      user: {
-        update,
-      },
-    } as never);
+    const update = vi.mocked(prisma.user.update);
+    vi.mocked(prisma.revenueCatWebhookEvent.create).mockRejectedValue({ code: "P2002" });
 
     const response = await POST(createRequest(event()));
 
@@ -78,17 +74,11 @@ describe("/api/billing/revenuecat-webhook", () => {
   });
 
   it("grants Pro for an initial purchase", async () => {
-    const update = vi.fn().mockResolvedValue({});
-    vi.mocked(getPrismaClient).mockReturnValue({
-      revenueCatWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        findUnique: vi.fn().mockResolvedValue({ id: "user-1" }),
-        update,
-      },
-    } as never);
+    const update = vi.mocked(prisma.user.update);
+    update.mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.delete).mockResolvedValue({});
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: "user-1" });
 
     const response = await POST(createRequest(event()));
 
@@ -106,17 +96,11 @@ describe("/api/billing/revenuecat-webhook", () => {
   });
 
   it("downgrades an Apple user on expiration", async () => {
-    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
-    vi.mocked(getPrismaClient).mockReturnValue({
-      revenueCatWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        findUnique: vi.fn().mockResolvedValue({ id: "user-1" }),
-        updateMany,
-      },
-    } as never);
+    const updateMany = vi.mocked(prisma.user.updateMany);
+    updateMany.mockResolvedValue({ count: 1 });
+    vi.mocked(prisma.revenueCatWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.delete).mockResolvedValue({});
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: "user-1" });
 
     const response = await POST(createRequest(event({ type: "EXPIRATION" })));
 
@@ -143,19 +127,11 @@ describe("/api/billing/revenuecat-webhook", () => {
   });
 
   it("does not treat PRODUCT_CHANGE as an immediate grant", async () => {
-    const update = vi.fn();
-    const updateMany = vi.fn();
-    vi.mocked(getPrismaClient).mockReturnValue({
-      revenueCatWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        findUnique: vi.fn().mockResolvedValue({ id: "user-1" }),
-        update,
-        updateMany,
-      },
-    } as never);
+    const update = vi.mocked(prisma.user.update);
+    const updateMany = vi.mocked(prisma.user.updateMany);
+    vi.mocked(prisma.revenueCatWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.delete).mockResolvedValue({});
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: "user-1" });
 
     const response = await POST(
       createRequest(
@@ -173,17 +149,11 @@ describe("/api/billing/revenuecat-webhook", () => {
   });
 
   it("does not downgrade a Stripe user on expiration", async () => {
-    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
-    vi.mocked(getPrismaClient).mockReturnValue({
-      revenueCatWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        findUnique: vi.fn().mockResolvedValue({ id: "user-1" }),
-        updateMany,
-      },
-    } as never);
+    const updateMany = vi.mocked(prisma.user.updateMany);
+    updateMany.mockResolvedValue({ count: 0 });
+    vi.mocked(prisma.revenueCatWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.delete).mockResolvedValue({});
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: "user-1" });
 
     const response = await POST(createRequest(event({ type: "EXPIRATION" })));
 
@@ -197,18 +167,10 @@ describe("/api/billing/revenuecat-webhook", () => {
   });
 
   it("acknowledges anonymous app user IDs with no alias as no-ops", async () => {
-    const update = vi.fn();
+    const update = vi.mocked(prisma.user.update);
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.mocked(getPrismaClient).mockReturnValue({
-      revenueCatWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        findUnique: vi.fn(),
-        update,
-      },
-    } as never);
+    vi.mocked(prisma.revenueCatWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.delete).mockResolvedValue({});
 
     const response = await POST(
       createRequest(event({ app_user_id: "$RCAnonymousID:abc", aliases: [] })),
@@ -221,17 +183,11 @@ describe("/api/billing/revenuecat-webhook", () => {
   });
 
   it("maps trial RevenueCat purchases to trialing", async () => {
-    const update = vi.fn().mockResolvedValue({});
-    vi.mocked(getPrismaClient).mockReturnValue({
-      revenueCatWebhookEvent: {
-        create: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
-      user: {
-        findUnique: vi.fn().mockResolvedValue({ id: "user-1" }),
-        update,
-      },
-    } as never);
+    const update = vi.mocked(prisma.user.update);
+    update.mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.create).mockResolvedValue({});
+    vi.mocked(prisma.revenueCatWebhookEvent.delete).mockResolvedValue({});
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: "user-1" });
 
     const response = await POST(createRequest(event({ period_type: "TRIAL" })));
 

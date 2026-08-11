@@ -32,8 +32,9 @@ export function isPaidBillingPlan(plan: string | null | undefined): plan is Bill
 export function getPublicBillingPlans(): PublicBillingPlan[] {
   const proPriceMonthly = process.env.NEXT_PUBLIC_PRO_PRICE_MONTHLY || "10";
   const scalePriceMonthly = process.env.NEXT_PUBLIC_SCALE_PRICE_MONTHLY || "50";
-  const proLimit = parseInt(process.env.NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT || "50", 10);
-  const scaleLimit = parseInt(process.env.NEXT_PUBLIC_SCALE_PLAN_TASK_LIMIT || "300", 10);
+  // Marketing copy only — enforcement is backend-side (GET /tasks/billing-summary)
+  const proLimit = 50;
+  const scaleLimit = 300;
 
   return [
     {

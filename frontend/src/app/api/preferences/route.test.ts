@@ -1,13 +1,15 @@
 import { GET, PATCH } from "./route";
-import { getPrismaClient } from "@/server/prisma";
+import prisma from "@/lib/prisma";
 import { getServerSession } from "@/server/session";
 
 vi.mock("@/server/session", () => ({
   getServerSession: vi.fn(),
 }));
 
-vi.mock("@/server/prisma", () => ({
-  getPrismaClient: vi.fn(),
+vi.mock("@/lib/prisma", () => ({
+  default: {
+    user: { findUnique: vi.fn(), update: vi.fn() },
+  },
 }));
 
 describe("/api/preferences", () => {
@@ -28,15 +30,11 @@ describe("/api/preferences", () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: { id: "user-1" },
     } as never);
-    vi.mocked(getPrismaClient).mockReturnValue({
-      user: {
-        findUnique: vi.fn().mockResolvedValue({
-          default_font_family: "Inter",
-          default_font_size: 28,
-          default_font_color: "#123456",
-          notify_on_completion: false,
-        }),
-      },
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({
+      default_font_family: "Inter",
+      default_font_size: 28,
+      default_font_color: "#123456",
+      notify_on_completion: false,
     } as never);
 
     const response = await GET();
@@ -92,14 +90,12 @@ describe("/api/preferences", () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: { id: "user-1" },
     } as never);
-    const update = vi.fn().mockResolvedValue({
+    const update = vi.mocked(prisma.user.update);
+    update.mockResolvedValue({
       default_font_family: "TikTokSans-Regular",
       default_font_size: 24,
       default_font_color: "#FFFFFF",
       notify_on_completion: true,
-    });
-    vi.mocked(getPrismaClient).mockReturnValue({
-      user: { update },
     } as never);
 
     const response = await PATCH(

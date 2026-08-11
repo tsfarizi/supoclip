@@ -8,9 +8,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+import json
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_cleanup_settings_json(
+    cleanup_settings_json: Optional[Any],
+) -> Optional[str]:
+    """Coerce cleanup settings into the JSON string bound to the jsonb column.
+
+    asyncpg refuses raw dicts for jsonb columns on text() SQL; the caller may
+    hand in either the already-serialized string or a dict.
+    """
+    if cleanup_settings_json is None or isinstance(cleanup_settings_json, str):
+        return cleanup_settings_json
+    return json.dumps(cleanup_settings_json)
 
 
 class TaskRepository:
@@ -28,61 +42,49 @@ class TaskRepository:
         caption_template: str = "default",
         include_broll: bool = False,
         processing_mode: str = "fast",
+        output_format: str = "vertical",
+        add_subtitles: bool = True,
+        cleanup_settings_json: Optional[Any] = None,
     ) -> str:
         """Create a new task and return its ID."""
         task_id = str(uuid4())
-        try:
-            result = await db.execute(
-                text("""
-                    INSERT INTO tasks (
-                        id, user_id, source_id, status, font_family, font_size, font_color,
-                        caption_template, include_broll, processing_mode,
-                        created_at, updated_at
-                    )
-                    VALUES (
-                        :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
-                        :caption_template, :include_broll, :processing_mode,
-                        NOW(), NOW()
-                    )
-                    RETURNING id
-                """),
-                {
-                    "task_id": task_id,
-                    "user_id": user_id,
-                    "source_id": source_id,
-                    "status": status,
-                    "font_family": font_family,
-                    "font_size": font_size,
-                    "font_color": font_color,
-                    "caption_template": caption_template,
-                    "include_broll": include_broll,
-                    "processing_mode": processing_mode,
-                },
-            )
-        except Exception:
-            await db.rollback()
-            result = await db.execute(
-                text("""
-                    INSERT INTO tasks (
-                        id, user_id, source_id, status, font_family, font_size, font_color,
-                        created_at, updated_at
-                    )
-                    VALUES (
-                        :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
-                        NOW(), NOW()
-                    )
-                    RETURNING id
-                """),
-                {
-                    "task_id": task_id,
-                    "user_id": user_id,
-                    "source_id": source_id,
-                    "status": status,
-                    "font_family": font_family,
-                    "font_size": font_size,
-                    "font_color": font_color,
-                },
-            )
+        # B3 fallback removed: single INSERT, fail-loud on any DB error.
+        # B2: task source settings are persisted here (output_format /
+        # add_subtitles / cleanup_settings_json), the Redis key is only a cache.
+        result = await db.execute(
+            text("""
+                INSERT INTO tasks (
+                    id, user_id, source_id, status, font_family, font_size, font_color,
+                    caption_template, include_broll, processing_mode,
+                    output_format, add_subtitles, cleanup_settings_json,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
+                    :caption_template, :include_broll, :processing_mode,
+                    :output_format, :add_subtitles, CAST(:cleanup_settings_json AS jsonb),
+                    NOW(), NOW()
+                )
+                RETURNING id
+            """),
+            {
+                "task_id": task_id,
+                "user_id": user_id,
+                "source_id": source_id,
+                "status": status,
+                "font_family": font_family,
+                "font_size": font_size,
+                "font_color": font_color,
+                "caption_template": caption_template,
+                "include_broll": include_broll,
+                "processing_mode": processing_mode,
+                "output_format": output_format,
+                "add_subtitles": add_subtitles,
+                "cleanup_settings_json": _serialize_cleanup_settings_json(
+                    cleanup_settings_json
+                ),
+            },
+        )
         await db.commit()
         task_id = result.scalar()
         if not task_id:
@@ -95,27 +97,17 @@ class TaskRepository:
         db: AsyncSession, task_id: str
     ) -> Optional[Dict[str, Any]]:
         """Get task by ID with source information."""
-        try:
-            result = await db.execute(
-                text("""
-                    SELECT t.*, s.title as source_title, s.type as source_type, s.url as source_url
-                    FROM tasks t
-                    LEFT JOIN sources s ON t.source_id = s.id
-                    WHERE t.id = :task_id
-                """),
-                {"task_id": task_id},
-            )
-        except Exception:
-            await db.rollback()
-            result = await db.execute(
-                text("""
-                    SELECT t.*, s.title as source_title, s.type as source_type
-                    FROM tasks t
-                    LEFT JOIN sources s ON t.source_id = s.id
-                    WHERE t.id = :task_id
-                """),
-                {"task_id": task_id},
-            )
+        # B3 fallback removed: single SELECT with sources.url (NOT NULL in
+        # Schema v2), fail-loud on any DB error.
+        result = await db.execute(
+            text("""
+                SELECT t.*, s.title as source_title, s.type as source_type, s.url as source_url
+                FROM tasks t
+                LEFT JOIN sources s ON t.source_id = s.id
+                WHERE t.id = :task_id
+            """),
+            {"task_id": task_id},
+        )
         row = result.fetchone()
 
         if not row:
@@ -128,24 +120,25 @@ class TaskRepository:
             "source_title": row.source_title,
             "source_type": row.source_type,
             "status": row.status,
-            "progress": getattr(row, "progress", None),
-            "progress_message": getattr(row, "progress_message", None),
+            "progress": row.progress,
+            "progress_message": row.progress_message,
             "generated_clips_ids": row.generated_clips_ids,
             "font_family": row.font_family,
             "font_size": row.font_size,
             "font_color": row.font_color,
-            "caption_template": getattr(row, "caption_template", "default"),
-            "include_broll": getattr(row, "include_broll", False),
-            "processing_mode": getattr(row, "processing_mode", "fast"),
-            "cache_hit": getattr(row, "cache_hit", False),
-            "error_code": getattr(row, "error_code", None),
-            "stage_timings_json": getattr(row, "stage_timings_json", None),
-            "started_at": getattr(row, "started_at", None),
-            "completed_at": getattr(row, "completed_at", None),
-            "completion_notification_sent_at": getattr(
-                row, "completion_notification_sent_at", None
-            ),
-            "source_url": getattr(row, "source_url", None),
+            "caption_template": row.caption_template,
+            "include_broll": row.include_broll,
+            "processing_mode": row.processing_mode,
+            "output_format": row.output_format,
+            "add_subtitles": row.add_subtitles,
+            "cleanup_settings_json": row.cleanup_settings_json,
+            "cache_hit": row.cache_hit,
+            "error_code": row.error_code,
+            "stage_timings_json": row.stage_timings_json,
+            "started_at": row.started_at,
+            "completed_at": row.completed_at,
+            "completion_notification_sent_at": row.completion_notification_sent_at,
+            "source_url": row.source_url,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -238,51 +231,47 @@ class TaskRepository:
         font_color: Optional[str],
         caption_template: str,
         include_broll: bool,
+        output_format: str = "vertical",
+        add_subtitles: bool = True,
+        cleanup_settings_json: Optional[Any] = None,
     ) -> None:
-        """Update task styling settings."""
-        try:
-            await db.execute(
-                text(
-                    """
-                    UPDATE tasks
-                    SET font_family = :font_family,
-                        font_size = :font_size,
-                        font_color = :font_color,
-                        caption_template = :caption_template,
-                        include_broll = :include_broll,
-                        updated_at = NOW()
-                    WHERE id = :task_id
-                    """
+        """Update task styling settings.
+
+        B2: output_format / add_subtitles / cleanup_settings_json are persisted
+        in the same statement so the Redis task_source key is only a cache.
+        """
+        # B3 fallback removed: single UPDATE with caption_template/include_broll,
+        # fail-loud on any DB error.
+        await db.execute(
+            text(
+                """
+                UPDATE tasks
+                SET font_family = :font_family,
+                    font_size = :font_size,
+                    font_color = :font_color,
+                    caption_template = :caption_template,
+                    include_broll = :include_broll,
+                    output_format = :output_format,
+                    add_subtitles = :add_subtitles,
+                    cleanup_settings_json = CAST(:cleanup_settings_json AS jsonb),
+                    updated_at = NOW()
+                WHERE id = :task_id
+                """
+            ),
+            {
+                "task_id": task_id,
+                "font_family": font_family,
+                "font_size": font_size,
+                "font_color": font_color,
+                "caption_template": caption_template,
+                "include_broll": include_broll,
+                "output_format": output_format,
+                "add_subtitles": add_subtitles,
+                "cleanup_settings_json": _serialize_cleanup_settings_json(
+                    cleanup_settings_json
                 ),
-                {
-                    "task_id": task_id,
-                    "font_family": font_family,
-                    "font_size": font_size,
-                    "font_color": font_color,
-                    "caption_template": caption_template,
-                    "include_broll": include_broll,
-                },
-            )
-        except Exception:
-            await db.rollback()
-            await db.execute(
-                text(
-                    """
-                    UPDATE tasks
-                    SET font_family = :font_family,
-                        font_size = :font_size,
-                        font_color = :font_color,
-                        updated_at = NOW()
-                    WHERE id = :task_id
-                    """
-                ),
-                {
-                    "task_id": task_id,
-                    "font_family": font_family,
-                    "font_size": font_size,
-                    "font_color": font_color,
-                },
-            )
+            },
+        )
         await db.commit()
 
     @staticmethod
@@ -397,6 +386,31 @@ class TaskRepository:
         )
         return [
             {"id": row.id, "user_id": row.user_id, "source_url": row.source_url or ""}
+            for row in result.fetchall()
+        ]
+
+    @staticmethod
+    async def get_queued_tasks(db: AsyncSession) -> List[Dict[str, Any]]:
+        """All tasks waiting in the queue, with timestamps for staleness checks.
+
+        Used by the worker recovery sweep to mark queued tasks that outlived
+        the timeout as error.
+        """
+        result = await db.execute(
+            text("""
+                SELECT t.id, t.status, t.created_at, t.updated_at
+                FROM tasks t
+                WHERE t.status = 'queued'
+                ORDER BY t.created_at ASC
+            """)
+        )
+        return [
+            {
+                "id": row.id,
+                "status": row.status,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
             for row in result.fetchall()
         ]
 

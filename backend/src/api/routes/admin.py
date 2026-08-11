@@ -84,7 +84,7 @@ class RuntimeSettingsUpdate(BaseModel):
 def _setting_status(
     setting_key: str, rows: dict[str, dict[str, object]]
 ):
-    env_value = get_config()._get_optional_env(setting_key)
+    env_value = get_config().get_optional_env(setting_key)
     has_env = bool(env_value)
     row = rows.get(setting_key, {})
     has_admin_value = bool(row.get("encrypted_value"))

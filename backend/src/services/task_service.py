@@ -12,42 +12,49 @@ import hashlib
 import re
 from time import perf_counter
 
-import redis.asyncio as redis
-import redis as sync_redis
-
 from ..repositories.task_repository import TaskRepository
 from ..repositories.source_repository import SourceRepository
 from ..repositories.clip_repository import ClipRepository
 from ..repositories.cache_repository import CacheRepository
+from .clip_render_service import ClipRenderService
 from .video_service import VideoService
 from .task_completion_email_service import (
     TaskCompletionEmailService,
     TaskCompletionRecipient,
 )
+from .task_metadata_service import TaskMetadataService
 from ..config import Config, get_config
+from ..errors import (
+    AnalysisError,
+    CancelledError,
+    DownloadError,
+    RenderError,
+    TaskProcessingError,
+    TranscriptionError,
+)
+# Retained: characterization tests monkeypatch these names on this module and
+# ClipRenderService resolves them through this namespace at call time.
 from ..clip_editor import (
     trim_clip_file,
     split_clip_file,
     merge_clip_files,
     overlay_custom_captions,
 )
-from ..video_utils import VALID_OUTPUT_FORMATS, parse_timestamp_to_seconds
-from ..transition_spec import normalize_transition_spec
+from ..video_utils import parse_timestamp_to_seconds
 from ..transition_engine import apply_transitions_between_clips
 from ..clip_cleanup import normalize_clip_cleanup_settings
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
 from ..clip_source_map import (
-    copy_clip_source_ranges,
     load_clip_source_ranges,
-    save_clip_source_ranges,
     source_range_bounds,
-    split_source_ranges,
-    total_source_duration,
-    trim_source_ranges,
 )
-from ..utils.async_helpers import run_in_thread
 
 logger = logging.getLogger(__name__)
+
+QUEUED_TASK_TIMEOUT_MESSAGE = (
+    "Task timed out while waiting in queue. "
+    "Ensure the worker process is running (run.ps1 starts it automatically)."
+)
 
 
 def normalize_video_identity(url: str) -> str:
@@ -79,6 +86,11 @@ class TaskService:
         self.cache_repo = CacheRepository()
         self.video_service = VideoService()
         self.config = config or get_config()
+        # ClipRenderService resolves its collaborators through this owner
+        # reference, so the task workflow and clip rendering share repos.
+        self.clip_render = ClipRenderService(self.db, self.config)
+        self.clip_render.task_service = self
+        self.metadata = TaskMetadataService(self.db, self.config)
 
     @staticmethod
     def _build_cache_key(
@@ -120,6 +132,9 @@ class TaskService:
         caption_template: str = "default",
         include_broll: bool = False,
         processing_mode: str = "fast",
+        output_format: str = "vertical",
+        add_subtitles: bool = True,
+        cleanup_settings: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Create a new task with associated source.
@@ -156,6 +171,9 @@ class TaskService:
             caption_template=caption_template,
             include_broll=include_broll,
             processing_mode=processing_mode,
+            output_format=output_format,
+            add_subtitles=add_subtitles,
+            cleanup_settings_json=cleanup_settings,
         )
 
         logger.info(f"Created task {task_id} for user {user_id}")
@@ -307,7 +325,7 @@ class TaskService:
             for i, segment in enumerate(segments_to_render):
                 # Check cancellation
                 if should_cancel and await should_cancel():
-                    raise Exception("Task cancelled")
+                    raise CancelledError("Task cancelled")
 
                 # Update progress: 70-95% spread across clips
                 clip_progress = 70 + int(
@@ -410,17 +428,40 @@ class TaskService:
                 "key_topics": result.get("key_topics"),
             }
 
+        except CancelledError as e:
+            logger.error(f"Error processing task {task_id}: {e}")
+            await self.task_repo.update_task_status(
+                self.db,
+                task_id,
+                "cancelled",
+                progress=0,
+                progress_message="Cancelled by user",
+            )
+            raise
+        except TaskProcessingError as e:
+            logger.error(f"Error processing task {task_id}: {e}")
+            await self.task_repo.update_task_status(
+                self.db, task_id, "error", progress=0, progress_message=str(e)
+            )
+            error_code = "task_error"
+            if isinstance(e, DownloadError):
+                error_code = "download_error"
+            elif isinstance(e, TranscriptionError):
+                error_code = "transcription_error"
+            elif isinstance(e, AnalysisError):
+                error_code = "analysis_error"
+            elif isinstance(e, RenderError):
+                error_code = "task_error"
+
+            await self.task_repo.update_task_runtime_metadata(
+                self.db,
+                task_id,
+                completed_at=datetime.utcnow(),
+                error_code=error_code,
+            )
+            raise
         except Exception as e:
             logger.error(f"Error processing task {task_id}: {e}")
-            if str(e) == "Task cancelled":
-                await self.task_repo.update_task_status(
-                    self.db,
-                    task_id,
-                    "cancelled",
-                    progress=0,
-                    progress_message="Cancelled by user",
-                )
-                raise
             await self.task_repo.update_task_status(
                 self.db, task_id, "error", progress=0, progress_message=str(e)
             )
@@ -508,25 +549,6 @@ class TaskService:
         if not task:
             return None
 
-        if self._is_stale_queued_task(task):
-            timeout_seconds = self.config.queued_task_timeout_seconds
-            logger.warning(
-                f"Task {task_id} stuck in queued status for over {timeout_seconds}s; marking as error"
-            )
-            await self.task_repo.update_task_status(
-                self.db,
-                task_id,
-                "error",
-                progress=0,
-                progress_message=(
-                    "Task timed out while waiting in queue. "
-                    "Ensure the worker process is running (run.ps1 starts it automatically)."
-                ),
-            )
-            task = await self.task_repo.get_task_by_id(self.db, task_id)
-            if not task:
-                return None
-
         # Get clips
         clips = await self.clip_repo.get_clips_by_task(self.db, task_id)
         task["clips"] = [
@@ -534,7 +556,7 @@ class TaskService:
             for clip in clips
         ]
         task["clips_count"] = len(clips)
-        task.update(await self._load_task_source_settings(task_id))
+        task.update(await self._load_task_source_settings(task))
 
         return task
 
@@ -627,6 +649,8 @@ class TaskService:
         include_broll: bool,
         apply_to_existing: bool,
         cleanup_settings: Optional[Dict[str, Any]] = None,
+        output_format: str = "vertical",
+        add_subtitles: bool = True,
     ) -> Dict[str, Any]:
         """Update task-level settings and optionally regenerate all clips."""
         await self.task_repo.update_task_settings(
@@ -637,6 +661,9 @@ class TaskService:
             font_color,
             caption_template,
             include_broll,
+            output_format=output_format,
+            add_subtitles=add_subtitles,
+            cleanup_settings_json=cleanup_settings,
         )
 
         if apply_to_existing:
@@ -669,7 +696,7 @@ class TaskService:
 
         source_url = task.get("source_url")
         source_type = task.get("source_type")
-        metadata = await self._load_task_source_settings(task_id)
+        metadata = await self._load_task_source_settings(task)
         output_format = metadata.get("output_format", "vertical")
         add_subtitles = metadata.get("add_subtitles", True)
         cleanup_payload = cleanup_settings or {
@@ -800,102 +827,14 @@ class TaskService:
         start_offset: float,
         end_offset: float,
     ) -> Dict[str, Any]:
-        clip = await self.clip_repo.get_clip_by_id(self.db, clip_id)
-        if not clip or clip["task_id"] != task_id:
-            raise ValueError("Clip not found")
-
-        input_path = Path(clip["file_path"])
-        if not input_path.exists():
-            raise ValueError("Clip file not found")
-
-        output_path = trim_clip_file(
-            input_path, Path(self.config.temp_dir) / "clips", start_offset, end_offset
+        return await self.clip_render.trim_clip(
+            task_id, clip_id, start_offset, end_offset
         )
-        source_ranges = self._get_clip_source_ranges(clip)
-        trimmed_ranges = trim_source_ranges(source_ranges, start_offset, end_offset)
-        clip_duration = max(0.1, total_source_duration(trimmed_ranges))
-        bounds = source_range_bounds(trimmed_ranges)
-        if not bounds:
-            raise ValueError("Trimmed clip has no remaining source mapping")
-        start_seconds, end_seconds = bounds
-        save_clip_source_ranges(output_path, trimmed_ranges)
-
-        new_start = self._seconds_to_mmss(start_seconds)
-        new_end = self._seconds_to_mmss(end_seconds)
-
-        await self.clip_repo.update_clip(
-            self.db,
-            clip_id,
-            output_path.name,
-            str(output_path),
-            new_start,
-            new_end,
-            clip_duration,
-            clip.get("text") or "",
-        )
-        return (await self.clip_repo.get_clip_by_id(self.db, clip_id)) or {}
 
     async def split_clip(
         self, task_id: str, clip_id: str, split_time: float
     ) -> Dict[str, Any]:
-        clip = await self.clip_repo.get_clip_by_id(self.db, clip_id)
-        if not clip or clip["task_id"] != task_id:
-            raise ValueError("Clip not found")
-
-        input_path = Path(clip["file_path"])
-        if not input_path.exists():
-            raise ValueError("Clip file not found")
-
-        first_path, second_path = split_clip_file(
-            input_path, Path(self.config.temp_dir) / "clips", split_time
-        )
-
-        clamped_split = max(0.2, min(split_time, float(clip["duration"]) - 0.2))
-        source_ranges = self._get_clip_source_ranges(clip)
-        first_ranges, second_ranges = split_source_ranges(source_ranges, clamped_split)
-        first_bounds = source_range_bounds(first_ranges)
-        second_bounds = source_range_bounds(second_ranges)
-        if not first_bounds or not second_bounds:
-            raise ValueError("Split clip has invalid source mapping")
-        save_clip_source_ranges(first_path, first_ranges)
-        save_clip_source_ranges(second_path, second_ranges)
-        first_duration = max(0.1, total_source_duration(first_ranges))
-        second_duration = max(0.1, total_source_duration(second_ranges))
-
-        await self.clip_repo.update_clip(
-            self.db,
-            clip_id,
-            first_path.name,
-            str(first_path),
-            self._seconds_to_mmss(first_bounds[0]),
-            self._seconds_to_mmss(first_bounds[1]),
-            first_duration,
-            clip.get("text") or "",
-        )
-
-        await self.clip_repo.create_clip(
-            self.db,
-            task_id=task_id,
-            filename=second_path.name,
-            file_path=str(second_path),
-            start_time=self._seconds_to_mmss(second_bounds[0]),
-            end_time=self._seconds_to_mmss(second_bounds[1]),
-            duration=second_duration,
-            text=clip.get("text") or "",
-            relevance_score=clip.get("relevance_score", 0.5),
-            reasoning=clip.get("reasoning") or "Split from original clip",
-            clip_order=clip.get("clip_order", 1) + 1,
-            virality_score=clip.get("virality_score", 0),
-            hook_score=clip.get("hook_score", 0),
-            engagement_score=clip.get("engagement_score", 0),
-            value_score=clip.get("value_score", 0),
-            shareability_score=clip.get("shareability_score", 0),
-            hook_type=clip.get("hook_type"),
-            hook_title=clip.get("hook_title"),
-        )
-
-        await self.clip_repo.reorder_task_clips(self.db, task_id)
-        return {"message": "Clip split successfully"}
+        return await self.clip_render.split_clip(task_id, clip_id, split_time)
 
     async def merge_clips(
         self,
@@ -904,74 +843,7 @@ class TaskService:
         transition: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Merge multiple clips into one, optionally rendering inter-clip transitions."""
-        if len(clip_ids) < 2:
-            raise ValueError("At least two clips are required to merge")
-
-        clips = []
-        for clip_id in clip_ids:
-            clip = await self.clip_repo.get_clip_by_id(self.db, clip_id)
-            if not clip or clip["task_id"] != task_id:
-                raise ValueError("One or more clips not found")
-            clips.append(clip)
-
-        ordered = sorted(clips, key=lambda c: c.get("clip_order", 0))
-        paths = [Path(c["file_path"]) for c in ordered]
-
-        spec = normalize_transition_spec(transition or "")
-        if spec != "none" and len(paths) >= 2:
-            try:
-                merged_path = apply_transitions_between_clips(
-                    paths, spec, Path(self.config.temp_dir) / "clips"
-                )
-            except (RuntimeError, ValueError) as e:
-                logger.warning(
-                    "Transition render failed for task %s spec %s: %s; falling back to hard concat",
-                    task_id,
-                    spec,
-                    e,
-                )
-                merged_path = merge_clip_files(
-                    paths,
-                    Path(self.config.temp_dir) / "clips",
-                )
-        else:
-            merged_path = merge_clip_files(
-                paths,
-                Path(self.config.temp_dir) / "clips",
-            )
-
-        merged_ranges = []
-        for clip in ordered:
-            merged_ranges.extend(self._get_clip_source_ranges(clip))
-        merged_bounds = source_range_bounds(merged_ranges)
-        if merged_bounds:
-            start_time = self._seconds_to_mmss(merged_bounds[0])
-            end_time = self._seconds_to_mmss(merged_bounds[1])
-            duration = total_source_duration(merged_ranges)
-            save_clip_source_ranges(merged_path, merged_ranges)
-        else:
-            start_time = ordered[0]["start_time"]
-            end_time = ordered[-1]["end_time"]
-            duration = sum(float(c.get("duration", 0.0)) for c in ordered)
-        text = " ".join((c.get("text") or "").strip() for c in ordered if c.get("text"))
-
-        first = ordered[0]
-        await self.clip_repo.update_clip(
-            self.db,
-            first["id"],
-            merged_path.name,
-            str(merged_path),
-            start_time,
-            end_time,
-            duration,
-            text,
-        )
-
-        for clip in ordered[1:]:
-            await self.clip_repo.delete_clip(self.db, clip["id"])
-
-        await self.clip_repo.reorder_task_clips(self.db, task_id)
-        return {"message": "Clips merged successfully", "clip_id": first["id"]}
+        return await self.clip_render.merge_clips(task_id, clip_ids, transition)
 
     async def update_clip_captions(
         self,
@@ -981,136 +853,9 @@ class TaskService:
         position: str,
         highlight_words: list[str],
     ) -> Dict[str, Any]:
-        clip = await self.clip_repo.get_clip_by_id(self.db, clip_id)
-        if not clip or clip["task_id"] != task_id:
-            raise ValueError("Clip not found")
-
-        input_path = Path(clip["file_path"])
-        if not input_path.exists():
-            raise ValueError("Clip file not found")
-
-        task = await self.task_repo.get_task_by_id(self.db, task_id)
-        if not task:
-            raise ValueError("Task not found")
-
-        transcript_video_path: Optional[Path] = None
-        source_url = task.get("source_url")
-        source_type = task.get("source_type")
-        processing_mode = (
-            task.get("processing_mode") or self.config.default_processing_mode
+        return await self.clip_render.update_clip_captions(
+            task_id, clip_id, caption_text, position, highlight_words
         )
-        if source_url and source_type:
-            cache_entry = await self.cache_repo.get_cache(
-                self.db,
-                self._build_cache_key(
-                    source_url,
-                    source_type,
-                    processing_mode,
-                    bool(task.get("include_broll", False)),
-                ),
-            )
-            cached_video_path = cache_entry.get("video_path") if cache_entry else None
-            if cached_video_path:
-                transcript_video_path = Path(cached_video_path)
-            elif source_type != "youtube":
-                try:
-                    transcript_video_path = self.video_service.resolve_local_video_path(
-                        source_url
-                    )
-                except ValueError:
-                    transcript_video_path = None
-
-        render_redis = sync_redis.Redis(
-            host=self.config.redis_host,
-            port=self.config.redis_port,
-            password=self.config.redis_password,
-            decode_responses=True,
-        )
-
-        # Serialize re-renders per clip: concurrent caption edits on the same
-        # clip used to race (both writing the DB, last-commit-wins) which could
-        # leave the clip row pointing at a file that was never persisted.
-        lock_key = f"clip_render_lock:{clip_id}"
-        lock_acquired = render_redis.set(lock_key, "1", nx=True, ex=600)
-        if not lock_acquired:
-            raise ValueError(
-                "Clip sedang di-render ulang. Tunggu hingga render selesai sebelum menyimpan perubahan caption."
-            )
-
-        def publish_render_progress(progress: int, message: str) -> None:
-            try:
-                render_redis.publish(
-                    f"progress:{task_id}",
-                    json.dumps(
-                        {
-                            "task_id": task_id,
-                            "clip_id": clip_id,
-                            "event_type": "clip_render",
-                            "progress": progress,
-                            "message": message,
-                            "status": "processing",
-                        }
-                    ),
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to publish clip render progress for %s", clip_id, exc_info=True
-                )
-
-        try:
-            output_path = await run_in_thread(
-                overlay_custom_captions,
-                input_path,
-                Path(self.config.temp_dir) / "clips",
-                caption_text,
-                position,
-                highlight_words,
-                font_family=task.get("font_family") or None,
-                font_size=task.get("font_size") or None,
-                font_color=task.get("font_color") or None,
-                caption_template=task.get("caption_template") or "default",
-                transcript_video_path=transcript_video_path,
-                source_ranges=self._get_clip_source_ranges(clip),
-                output_format=task.get("output_format") or "vertical",
-                hook_title=clip.get("hook_title"),
-                progress_callback=publish_render_progress,
-            )
-            if not output_path.exists():
-                raise RuntimeError("Re-render failed: output clip file was not created")
-            # Carry the source-range mapping to the new file first, then drop the
-            # superseded clip file once the new one exists.
-            copy_clip_source_ranges(input_path, output_path)
-            if (
-                input_path.exists()
-                and input_path.resolve() != output_path.resolve()
-            ):
-                try:
-                    input_path.unlink(missing_ok=True)
-                except Exception:
-                    logger.debug(
-                        "Could not remove superseded clip file %s", input_path, exc_info=True
-                    )
-        finally:
-            try:
-                render_redis.delete(lock_key)
-            except Exception:
-                pass
-            try:
-                render_redis.close()
-            except Exception:
-                pass
-
-        await self.clip_repo.update_clip(
-            self.db,
-            clip_id,
-            output_path.name,
-            str(output_path),
-            clip["start_time"],
-            clip["end_time"],
-            clip["duration"],
-            caption_text,
-        )
-        return (await self.clip_repo.get_clip_by_id(self.db, clip_id)) or {}
 
     async def get_performance_metrics(self) -> Dict[str, Any]:
         """Return aggregate processing performance metrics."""
@@ -1135,56 +880,7 @@ class TaskService:
         end_seconds = parse_timestamp_to_seconds(clip["end_time"])
         return [(start_seconds, end_seconds)]
 
-    async def _load_task_source_settings(self, task_id: str) -> Dict[str, Any]:
-        defaults = {
-            "output_format": "vertical",
-            "add_subtitles": True,
-            **normalize_clip_cleanup_settings(),
-        }
-        redis_client = redis.Redis(
-            host=self.config.redis_host,
-            port=self.config.redis_port,
-            password=self.config.redis_password,
-            decode_responses=True,
-        )
-        try:
-            payload = await redis_client.get(f"task_source:{task_id}")
-        except Exception as exc:
-            logger.warning(
-                "Falling back to default task source settings for task %s: %s",
-                task_id,
-                exc,
-            )
-            return defaults
-        finally:
-            try:
-                await redis_client.close()
-            except Exception:
-                pass
-
-        if not payload:
-            return defaults
-
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError:
-            return defaults
-
-        output_format = parsed.get("output_format", defaults["output_format"])
-        if output_format not in VALID_OUTPUT_FORMATS:
-            output_format = defaults["output_format"]
-
-        add_subtitles = parsed.get("add_subtitles", defaults["add_subtitles"])
-        if not isinstance(add_subtitles, bool):
-            add_subtitles = defaults["add_subtitles"]
-
-        return {
-            "output_format": output_format,
-            "add_subtitles": add_subtitles,
-            **normalize_clip_cleanup_settings(
-                parsed.get("cut_long_pauses"),
-                parsed.get("pause_threshold_ms"),
-                parsed.get("remove_filler_words"),
-                parsed.get("filtered_words"),
-            ),
-        }
+    async def _load_task_source_settings(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        # Delegation keeps the historical method name stable for callers and
+        # characterization tests; the logic lives in TaskMetadataService.
+        return await self.metadata.load_source_settings(task)

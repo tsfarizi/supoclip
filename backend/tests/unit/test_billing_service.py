@@ -118,3 +118,56 @@ async def test_inactive_paid_plan_requires_upgrade():
     assert summary["plan"] == "scale"
     assert summary["can_create_task"] is False
     assert summary["upgrade_required"] is True
+
+
+# --- B3 fallback removed: missing user / DB errors are fail-loud -------------
+
+class _FailingSession:
+    async def execute(self, *_args, **_kwargs):
+        raise RuntimeError("db down")
+
+
+@pytest.mark.asyncio
+async def test_get_usage_summary_raises_value_error_for_unknown_user():
+    # B3 fallback removed: an unknown user must raise ValueError ("User not
+    # found") instead of silently degrading to a free-plan row. Routes map
+    # ValueError to 404.
+    service = BillingService(  # type: ignore[arg-type]
+        _FakeSession([None])
+    )
+    service.config.self_host = False
+    service.config.monetization_enabled = True
+
+    with pytest.raises(ValueError, match="User not found"):
+        await service.get_usage_summary("unknown-user")
+
+
+@pytest.mark.asyncio
+async def test_get_usage_summary_propagates_db_errors():
+    # B3 fallback removed: a DB failure must propagate instead of being
+    # swallowed and replaced with a free-plan default row.
+    service = BillingService(  # type: ignore[arg-type]
+        _FailingSession()
+    )
+    service.config.self_host = False
+    service.config.monetization_enabled = True
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await service.get_usage_summary("user-1")
+
+
+@pytest.mark.asyncio
+async def test_self_host_flow_returns_early_before_billing_row():
+    # Self-hosted flow must not touch the billing row at all: monetization is
+    # disabled, so the summary is returned before _load_user_billing_row runs.
+    service = BillingService(  # type: ignore[arg-type]
+        _FailingSession()
+    )
+    service.config.self_host = True
+    service.config.monetization_enabled = False
+
+    summary = await service.get_usage_summary("user-1")
+
+    assert summary["monetization_enabled"] is False
+    assert summary["plan"] == "self_host"
+    assert summary["can_create_task"] is True

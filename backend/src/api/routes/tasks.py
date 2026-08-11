@@ -10,7 +10,6 @@ from pathlib import Path
 import json
 import logging
 from typing import Dict, Any, Optional
-import inspect
 import re
 import secrets
 
@@ -26,7 +25,7 @@ from ...font_registry import is_font_accessible
 from ...clip_cleanup import normalize_clip_cleanup_settings
 from ...video_utils import VALID_OUTPUT_FORMATS
 from ...admin_auth import require_admin_user
-import redis.asyncio as redis
+from ...infra.redis_client import get_redis_client
 from ...clip_editor import export_with_preset, EXPORT_PRESETS
 
 logger = logging.getLogger(__name__)
@@ -64,20 +63,12 @@ async def _get_user_id_from_headers(request: Request, db: AsyncSession) -> str:
 
 
 async def _load_task_source_metadata(task_id: str) -> Dict[str, Any]:
-    runtime_config = get_config()
-    redis_client = redis.Redis(
-        host=runtime_config.redis_host,
-        port=runtime_config.redis_port,
-        password=runtime_config.redis_password,
-        decode_responses=True,
-    )
+    redis_client = get_redis_client()
     try:
         payload = await redis_client.get(f"task_source:{task_id}")
     except Exception as exc:
         logger.warning("Unable to load task source metadata for %s: %s", task_id, exc)
         return {}
-    finally:
-        await redis_client.aclose()
 
     if not payload:
         return {}
@@ -89,13 +80,7 @@ async def _load_task_source_metadata(task_id: str) -> Dict[str, Any]:
 
 
 async def _save_task_source_metadata(task_id: str, payload: Dict[str, Any]) -> None:
-    runtime_config = get_config()
-    redis_client = redis.Redis(
-        host=runtime_config.redis_host,
-        port=runtime_config.redis_port,
-        password=runtime_config.redis_password,
-        decode_responses=True,
-    )
+    redis_client = get_redis_client()
     try:
         await redis_client.set(
             f"task_source:{task_id}",
@@ -104,8 +89,6 @@ async def _save_task_source_metadata(task_id: str, payload: Dict[str, Any]) -> N
         )
     except Exception as exc:
         logger.warning("Unable to save task source metadata for %s: %s", task_id, exc)
-    finally:
-        await redis_client.aclose()
 
 
 def _merge_task_source_metadata(
@@ -281,6 +264,9 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             caption_template=caption_template,
             include_broll=include_broll,
             processing_mode=processing_mode,
+            output_format=output_format,
+            add_subtitles=add_subtitles,
+            cleanup_settings=cleanup_settings,
         )
 
         # Get source type for worker
@@ -308,7 +294,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             cleanup_settings=cleanup_settings,
         )
 
-        # Save source metadata for resume/retries in environments without sources.url column
+        # Cache source metadata for resume/retries; the tasks columns are now
+        # the source of truth (B2), this Redis key is a legacy fallback cache.
         await _save_task_source_metadata(
             task_id,
             _merge_task_source_metadata(
@@ -538,32 +525,22 @@ async def get_task_progress_sse(
             return
 
         # Connect to Redis for real-time updates
-        runtime_config = get_config()
-        redis_client = redis.Redis(
-            host=runtime_config.redis_host,
-            port=runtime_config.redis_port,
-            password=runtime_config.redis_password,
-            decode_responses=True,
-        )
+        redis_client = get_redis_client()
 
-        try:
-            # Subscribe to progress updates
-            async for progress_data in ProgressTracker.subscribe_to_progress(
-                redis_client, task_id
-            ):
-                event_type = progress_data.get("event_type", "progress")
-                yield {"event": event_type, "data": json.dumps(progress_data)}
+        # Subscribe to progress updates
+        async for progress_data in ProgressTracker.subscribe_to_progress(
+            redis_client, task_id
+        ):
+            event_type = progress_data.get("event_type", "progress")
+            yield {"event": event_type, "data": json.dumps(progress_data)}
 
-                # Close connection if task is done (task mode only)
-                if not edit_mode and progress_data.get("status") in ["completed", "error"]:
-                    yield {
-                        "event": "close",
-                        "data": json.dumps({"status": progress_data.get("status")}),
-                    }
-                    break
-
-        finally:
-            await redis_client.close()
+            # Close connection if task is done (task mode only)
+            if not edit_mode and progress_data.get("status") in ["completed", "error"]:
+                yield {
+                    "event": "close",
+                    "data": json.dumps({"status": progress_data.get("status")}),
+                }
+                break
 
     return EventSourceResponse(event_generator())
 
@@ -865,6 +842,18 @@ async def apply_task_settings(
             raise HTTPException(
                 status_code=400, detail="Selected font is not available"
             )
+        # Output format / subtitle settings default to the current DB record so
+        # a partial payload never silently resets render settings.
+        output_format = payload.get(
+            "output_format", task_record.get("output_format") or "vertical"
+        )
+        if output_format not in VALID_OUTPUT_FORMATS:
+            output_format = "vertical"
+        add_subtitles = payload.get(
+            "add_subtitles", task_record.get("add_subtitles", True)
+        )
+        if not isinstance(add_subtitles, bool):
+            add_subtitles = True
         task = await task_service.update_task_settings(
             task_id,
             font_family,
@@ -874,6 +863,8 @@ async def apply_task_settings(
             include_broll,
             apply_to_existing,
             cleanup_settings,
+            output_format=output_format,
+            add_subtitles=add_subtitles,
         )
         metadata = await _load_task_source_metadata(task_id)
         await _save_task_source_metadata(
@@ -882,12 +873,8 @@ async def apply_task_settings(
                 metadata,
                 source_url=metadata.get("url") or task_record.get("source_url"),
                 source_type=metadata.get("source_type") or task_record.get("source_type"),
-                output_format=metadata.get("output_format") or task.get("output_format"),
-                add_subtitles=(
-                    metadata["add_subtitles"]
-                    if isinstance(metadata.get("add_subtitles"), bool)
-                    else task.get("add_subtitles")
-                ),
+                output_format=task.get("output_format"),
+                add_subtitles=task.get("add_subtitles"),
                 cleanup_settings=cleanup_settings,
             ),
         )
@@ -958,17 +945,8 @@ async def cancel_task(
         if task.get("status") in ["completed", "error", "cancelled"]:
             return {"message": f"Task already in terminal state: {task.get('status')}"}
 
-        runtime_config = get_config()
-        redis_client = redis.Redis(
-            host=runtime_config.redis_host,
-            port=runtime_config.redis_port,
-            password=runtime_config.redis_password,
-            decode_responses=True,
-        )
-        try:
-            await redis_client.setex(f"task_cancel:{task_id}", 3600, "1")
-        finally:
-            await redis_client.close()
+        redis_client = get_redis_client()
+        await redis_client.setex(f"task_cancel:{task_id}", 3600, "1")
 
         await task_service.task_repo.update_task_status(
             db,
@@ -1019,41 +997,70 @@ async def resume_task(
 
         source_url = task.get("source_url")
         source_type = task.get("source_type")
-        output_format = "vertical"
-        add_subtitles = True
+        # B2: render settings are read from the task record (Schema v2 columns);
+        # the Redis task_source key is only consulted for legacy rows whose
+        # columns are still NULL.
+        output_format = task.get("output_format") or "vertical"
+        if output_format not in VALID_OUTPUT_FORMATS:
+            output_format = "vertical"
+        add_subtitles = task.get("add_subtitles", True)
+        if not isinstance(add_subtitles, bool):
+            add_subtitles = True
+        cleanup_settings = None
+        cleanup_settings_json = task.get("cleanup_settings_json")
+        if cleanup_settings_json is not None:
+            # asyncpg 0.31 decodes the jsonb column to a dict natively, so the
+            # column may arrive either already parsed or as a JSON string.
+            parsed_cleanup = cleanup_settings_json
+            if isinstance(cleanup_settings_json, str):
+                try:
+                    parsed_cleanup = json.loads(cleanup_settings_json)
+                except json.JSONDecodeError:
+                    parsed_cleanup = None
+            if isinstance(parsed_cleanup, dict):
+                cleanup_settings = normalize_clip_cleanup_settings(
+                    parsed_cleanup.get("cut_long_pauses"),
+                    parsed_cleanup.get("pause_threshold_ms"),
+                    parsed_cleanup.get("remove_filler_words"),
+                    parsed_cleanup.get("filtered_words"),
+                )
 
-        metadata = await _load_task_source_metadata(task_id)
+        needs_redis = (
+            not source_url
+            or not source_type
+            or task.get("output_format") is None
+            or task.get("add_subtitles") is None
+            or cleanup_settings is None
+        )
+        metadata = {}
+        if needs_redis:
+            metadata = await _load_task_source_metadata(task_id)
         if not source_url:
             source_url = metadata.get("url")
         if not source_type:
             source_type = metadata.get("source_type")
-        of = metadata.get("output_format", output_format)
-        if of in VALID_OUTPUT_FORMATS:
-            output_format = of
-        asub = metadata.get("add_subtitles", add_subtitles)
-        if isinstance(asub, bool):
-            add_subtitles = asub
-        cleanup_settings = normalize_clip_cleanup_settings(
-            metadata.get("cut_long_pauses"),
-            metadata.get("pause_threshold_ms"),
-            metadata.get("remove_filler_words"),
-            metadata.get("filtered_words"),
-        )
+        if task.get("output_format") is None:
+            of = metadata.get("output_format")
+            if of in VALID_OUTPUT_FORMATS:
+                output_format = of
+        if task.get("add_subtitles") is None:
+            asub = metadata.get("add_subtitles")
+            if isinstance(asub, bool):
+                add_subtitles = asub
+        if cleanup_settings is None:
+            cleanup_settings = normalize_clip_cleanup_settings(
+                metadata.get("cut_long_pauses"),
+                metadata.get("pause_threshold_ms"),
+                metadata.get("remove_filler_words"),
+                metadata.get("filtered_words"),
+            )
 
         if not source_url or not source_type:
             raise HTTPException(status_code=400, detail="Task source URL is missing")
 
         runtime_config = get_config()
-        redis_client = redis.Redis(
-            host=runtime_config.redis_host,
-            port=runtime_config.redis_port,
-            password=runtime_config.redis_password,
-            decode_responses=True,
-        )
-        try:
-            await redis_client.delete(f"task_cancel:{task_id}")
-        finally:
-            await redis_client.close()
+        redis_client = get_redis_client()
+        await redis_client.delete(f"task_cancel:{task_id}")
 
         await task_service.task_repo.update_task_status(
             db,
@@ -1094,28 +1101,21 @@ async def resume_task(
 
 
 @router.get("/dead-letter/list")
-async def list_dead_letter_tasks():
+async def list_dead_letter_tasks(
+    request: Request, db: AsyncSession = Depends(get_db)
+):
     """List tasks that exhausted retries and landed in dead-letter store."""
-    runtime_config = get_config()
-    redis_client = redis.Redis(
-        host=runtime_config.redis_host,
-        port=runtime_config.redis_port,
-        password=runtime_config.redis_password,
-        decode_responses=True,
-    )
-    try:
-        ids_result = redis_client.smembers("tasks:dead_letter")
-        ids = await ids_result if inspect.isawaitable(ids_result) else ids_result
-        items = []
-        safe_ids = list(ids or [])
-        for task_id in sorted(safe_ids):
-            payload = await redis_client.get(f"dead_letter:{task_id}")
-            if payload:
-                try:
-                    items.append(json.loads(payload))
-                except json.JSONDecodeError:
-                    items.append({"task_id": task_id, "raw": payload})
+    await require_admin_user(request, db, get_config())
+    redis_client = get_redis_client()
+    ids = await redis_client.smembers("tasks:dead_letter")
+    items = []
+    safe_ids = list(ids or [])
+    for task_id in sorted(safe_ids):
+        payload = await redis_client.get(f"dead_letter:{task_id}")
+        if payload:
+            try:
+                items.append(json.loads(payload))
+            except json.JSONDecodeError:
+                items.append({"task_id": task_id, "raw": payload})
 
-        return {"total": len(items), "tasks": items}
-    finally:
-        await redis_client.close()
+    return {"total": len(items), "tasks": items}

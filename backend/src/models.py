@@ -221,13 +221,6 @@ class Source(Base):
     # Relationships - Source can have multiple tasks
     tasks: Mapped[List["Task"]] = relationship("Task", back_populates="source")
 
-    def decide_source_type(self, source_url: str) -> str:
-        """Decide which type of source this is."""
-        if "youtube" in source_url:
-            return "youtube"
-        else:
-            return "video_url"
-
 
 class GeneratedClip(Base):
     __tablename__ = "generated_clips"

@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-import redis.asyncio as redis
 import requests
 import yt_dlp
 
 from .apify_youtube_downloader import ApifyDownloadError, download_video_via_apify
 from .config import get_config
+from .infra.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -647,13 +647,7 @@ async def acquire_video_download_lock(
     Redis connection failures are re-raised so the caller never proceeds
     unguarded (the worker retry machinery is the correct recovery path).
     """
-    config = get_config()
-    redis_client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        password=config.redis_password,
-        decode_responses=True,
-    )
+    redis_client = get_redis_client()
     try:
         acquired = await redis_client.set(
             f"{VIDEO_DOWNLOAD_LOCK_KEY_PREFIX}{video_id}",
@@ -667,8 +661,6 @@ async def acquire_video_download_lock(
             "Failed to acquire video download lock for %s: %s", video_id, exc
         )
         raise
-    finally:
-        await redis_client.aclose()
 
 
 async def release_video_download_lock(video_id: str) -> None:
@@ -678,21 +670,13 @@ async def release_video_download_lock(video_id: str) -> None:
     Never raises: DEL on a missing key is a no-op and Redis failures during
     cleanup are logged, not propagated.
     """
-    config = get_config()
-    redis_client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        password=config.redis_password,
-        decode_responses=True,
-    )
+    redis_client = get_redis_client()
     try:
         await redis_client.delete(f"{VIDEO_DOWNLOAD_LOCK_KEY_PREFIX}{video_id}")
     except Exception as exc:
         logger.warning(
             "Failed to release video download lock for %s: %s", video_id, exc
         )
-    finally:
-        await redis_client.aclose()
 
 
 def _find_existing_download(video_id: str) -> Optional[Path]:

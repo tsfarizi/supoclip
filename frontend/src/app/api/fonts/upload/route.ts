@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { buildBackendAuthHeaders } from "@/lib/backend-auth";
+import { getBackendApiBaseUrl } from "@/server/backend-api";
 
 export async function POST(request: Request) {
   const session = await auth.api.getSession({ headers: await headers() });
@@ -11,14 +12,10 @@ export async function POST(request: Request) {
   }
 
   const formData = await request.formData();
-  const apiUrl =
-    process.env.BACKEND_INTERNAL_URL ||
-    process.env.NEXT_PUBLIC_API_URL ||
-    "http://localhost:8000";
-  const normalizedApiUrl = apiUrl.replace(/\/$/, "");
+  const apiUrl = getBackendApiBaseUrl();
   const backendAuthHeaders = buildBackendAuthHeaders(session.user.id);
 
-  let upstream = await fetch(`${normalizedApiUrl}/fonts/upload`, {
+  let upstream = await fetch(`${apiUrl}/fonts/upload`, {
     method: "POST",
     headers: {
       ...backendAuthHeaders,
@@ -27,7 +24,7 @@ export async function POST(request: Request) {
   });
 
   if (upstream.status === 404) {
-    upstream = await fetch(`${normalizedApiUrl}/api/fonts/upload`, {
+    upstream = await fetch(`${apiUrl}/api/fonts/upload`, {
       method: "POST",
       headers: {
         ...backendAuthHeaders,

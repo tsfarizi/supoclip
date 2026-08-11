@@ -33,6 +33,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
+from src.config import DEFAULT_FFMPEG_BIN_DIR
 from src.transition_spec import (
     DEFAULT_FADE_SECONDS,
     MAX_FADE_SECONDS,
@@ -58,9 +59,7 @@ from src.api.routes.media import (
     get_transition_file,
 )
 
-_FFMPEG_BIN_DIR = Path(
-    r"C:\Users\teuku\AppData\Local\Programs\ffmpeg\ffmpeg-9.0-essentials_build\bin"
-)
+_FFMPEG_BIN_DIR = Path(os.getenv("FFMPEG_BIN_DIR", DEFAULT_FFMPEG_BIN_DIR))
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _TRANSITIONS_DIR = transitions_dir()
 
@@ -168,6 +167,17 @@ class TestNormalizeTransitionSpec:
     def test_unknown_prefix_falls_back_to_none(self):
         assert normalize_transition_spec("cut:dissolve") == "none"
 
+    def test_file_prefix_with_empty_tail_falls_back_to_none(self):
+        assert normalize_transition_spec("file:") == "none"
+
+    def test_non_string_input_is_coerced_then_rejected(self):
+        assert normalize_transition_spec(123) == "none"
+        assert normalize_transition_spec(None) == "none"
+
+    def test_xfade_allowlist_members_survive_round_trip(self):
+        for name in XFADE_ALLOWLIST:
+            assert normalize_transition_spec(f"xfade:{name}") == f"xfade:{name}"
+
 
 class TestTransitionKind:
     def test_kind_none(self):
@@ -242,6 +252,16 @@ class TestClampFade:
         assert clamp_fade(None, 3.0) == 0.0
         assert clamp_fade(0.3, None) == 0.0
         assert clamp_fade(0.3, 0.0) == 0.0
+
+    def test_below_min_requested_fade_is_raised_to_min(self):
+        assert clamp_fade(0.02, 3.0) == pytest.approx(0.06)
+        assert clamp_fade(0.05, 3.0) == pytest.approx(0.06)
+        assert clamp_fade(0.06, 3.0) == pytest.approx(0.06)
+
+    def test_pair_exactly_twice_min_fade_survives(self):
+        # min_pair=0.12 -> upper = 0.06, which is not below the min, so the
+        # fade is allowed at exactly the minimum.
+        assert clamp_fade(0.3, 0.12) == pytest.approx(0.06)
 
 
 class TestResolveTransitionFile:

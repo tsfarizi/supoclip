@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { buildBackendAuthHeaders } from "@/lib/backend-auth";
+import { getBackendApiBaseUrl } from "@/server/backend-api";
 
 interface Params {
   params: Promise<{ fontName: string }>;
@@ -15,15 +16,11 @@ export async function GET(_: Request, { params }: Params) {
   }
 
   const { fontName } = await params;
-  const apiUrl =
-    process.env.BACKEND_INTERNAL_URL ||
-    process.env.NEXT_PUBLIC_API_URL ||
-    "http://localhost:8000";
-  const normalizedApiUrl = apiUrl.replace(/\/$/, "");
+  const apiUrl = getBackendApiBaseUrl();
   const encodedFontName = encodeURIComponent(fontName);
   const backendAuthHeaders = buildBackendAuthHeaders(session.user.id);
 
-  let upstream = await fetch(`${normalizedApiUrl}/fonts/${encodedFontName}`, {
+  let upstream = await fetch(`${apiUrl}/fonts/${encodedFontName}`, {
     headers: {
       ...backendAuthHeaders,
     },
@@ -31,7 +28,7 @@ export async function GET(_: Request, { params }: Params) {
   });
 
   if (upstream.status === 404) {
-    upstream = await fetch(`${normalizedApiUrl}/api/fonts/${encodedFontName}`, {
+    upstream = await fetch(`${apiUrl}/api/fonts/${encodedFontName}`, {
       headers: {
         ...backendAuthHeaders,
       },
@@ -56,15 +53,11 @@ export async function DELETE(_: Request, { params }: Params) {
   }
 
   const { fontName } = await params;
-  const apiUrl =
-    process.env.BACKEND_INTERNAL_URL ||
-    process.env.NEXT_PUBLIC_API_URL ||
-    "http://localhost:8000";
-  const normalizedApiUrl = apiUrl.replace(/\/$/, "");
+  const apiUrl = getBackendApiBaseUrl();
   const encodedFontName = encodeURIComponent(fontName);
   const backendAuthHeaders = buildBackendAuthHeaders(session.user.id);
 
-  const upstream = await fetch(`${normalizedApiUrl}/fonts/${encodedFontName}`, {
+  const upstream = await fetch(`${apiUrl}/fonts/${encodedFontName}`, {
     method: "DELETE",
     headers: {
       ...backendAuthHeaders,

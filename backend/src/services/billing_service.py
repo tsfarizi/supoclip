@@ -37,50 +37,40 @@ class BillingService:
         return start, end
 
     async def _load_user_billing_row(self, user_id: str) -> dict[str, Any]:
-        try:
-            result = await self.db.execute(
-                text(
-                    """
-                    SELECT
-                        plan,
-                        subscription_status,
-                        subscription_provider,
-                        billing_period_start,
-                        billing_period_end,
-                        trial_ends_at
-                    FROM users
-                    WHERE id = :user_id
-                    """
-                ),
-                {"user_id": user_id},
-            )
-            row = result.fetchone()
-            if not row:
-                raise ValueError("User not found")
+        # B3 fallback removed: ValueError (user not found) and DB errors flow to
+        # the caller instead of silently degrading to a free-plan row.
+        result = await self.db.execute(
+            text(
+                """
+                SELECT
+                    plan,
+                    subscription_status,
+                    subscription_provider,
+                    billing_period_start,
+                    billing_period_end,
+                    trial_ends_at
+                FROM users
+                WHERE id = :user_id
+                """
+            ),
+            {"user_id": user_id},
+        )
+        row = result.fetchone()
+        if not row:
+            raise ValueError("User not found")
 
-            return {
-                "plan": (row.plan or "free").lower(),
-                "subscription_status": (row.subscription_status or "inactive").lower(),
-                "subscription_provider": (
-                    row.subscription_provider.lower()
-                    if row.subscription_provider
-                    else None
-                ),
-                "billing_period_start": row.billing_period_start,
-                "billing_period_end": row.billing_period_end,
-                "trial_ends_at": row.trial_ends_at,
-            }
-        except Exception:
-            now = datetime.now(timezone.utc)
-            start, end = self._month_window(now)
-            return {
-                "plan": "free",
-                "subscription_status": "inactive",
-                "subscription_provider": None,
-                "billing_period_start": start,
-                "billing_period_end": end,
-                "trial_ends_at": None,
-            }
+        return {
+            "plan": (row.plan or "free").lower(),
+            "subscription_status": (row.subscription_status or "inactive").lower(),
+            "subscription_provider": (
+                row.subscription_provider.lower()
+                if row.subscription_provider
+                else None
+            ),
+            "billing_period_start": row.billing_period_start,
+            "billing_period_end": row.billing_period_end,
+            "trial_ends_at": row.trial_ends_at,
+        }
 
     async def _count_tasks(
         self, user_id: str, period_start: datetime, period_end: datetime

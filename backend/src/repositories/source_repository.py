@@ -21,42 +21,25 @@ class SourceRepository:
     ) -> str:
         """Create a new source record and return its ID."""
         source_id = str(uuid4())
-        try:
-            result = await db.execute(
-                text(
-                    """
-                    INSERT INTO sources (id, type, title, url, created_at, updated_at)
-                    VALUES (:source_id, :source_type, :title, :url, NOW(), NOW())
-                    RETURNING id
-                    """
-                ),
-                {
-                    "source_id": source_id,
-                    "source_type": source_type,
-                    "title": title,
-                    "url": url,
-                },
-            )
-            source_id = result.scalar()
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            result = await db.execute(
-                text(
-                    """
-                    INSERT INTO sources (id, type, title, created_at, updated_at)
-                    VALUES (:source_id, :source_type, :title, NOW(), NOW())
-                    RETURNING id
-                    """
-                ),
-                {
-                    "source_id": source_id,
-                    "source_type": source_type,
-                    "title": title,
-                },
-            )
-            source_id = result.scalar()
-            await db.commit()
+        # B3 fallback removed: single INSERT with url (NOT NULL in Schema v2),
+        # fail-loud on any DB error.
+        result = await db.execute(
+            text(
+                """
+                INSERT INTO sources (id, type, title, url, created_at, updated_at)
+                VALUES (:source_id, :source_type, :title, :url, NOW(), NOW())
+                RETURNING id
+                """
+            ),
+            {
+                "source_id": source_id,
+                "source_type": source_type,
+                "title": title,
+                "url": url,
+            },
+        )
+        source_id = result.scalar()
+        await db.commit()
 
         logger.info(f"Created source {source_id}: {title} ({source_type})")
         return source_id

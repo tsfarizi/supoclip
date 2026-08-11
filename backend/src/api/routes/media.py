@@ -41,9 +41,11 @@ _BUNDLED_TRANSITIONS_DIR = (
     Path(__file__).resolve().parent.parent.parent.parent / "transitions"
 )
 _TRANSITION_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
-_FFMPEG_BIN_DIR = Path(
-    r"C:\Users\teuku\AppData\Local\Programs\ffmpeg\ffmpeg-9.0-essentials_build\bin"
-)
+
+
+def _ffmpeg_bin_dir() -> Path:
+    """Resolve the configured ffmpeg bin directory (FFMPEG_BIN_DIR)."""
+    return Path(get_config().ffmpeg_bin_dir)
 
 
 async def _get_authenticated_user_id(request: Request, db: AsyncSession) -> str:
@@ -128,17 +130,17 @@ def _title_case_display_name(name: str) -> str:
 
 
 def _ffprobe_executable() -> Optional[str]:
-    """Locate an ffprobe executable (bundled install first, then PATH)."""
-    bundled = _FFMPEG_BIN_DIR / "ffprobe.exe"
+    """Locate an ffprobe executable (configured install first, then PATH)."""
+    bundled = _ffmpeg_bin_dir() / "ffprobe.exe"
     if bundled.is_file():
         return str(bundled)
     return shutil.which("ffprobe")
 
 
 def _subprocess_env() -> dict[str, str]:
-    """Environment with the bundled ffmpeg bin directory on PATH."""
+    """Environment with the configured ffmpeg bin directory on PATH."""
     env = dict(os.environ)
-    env["PATH"] = str(_FFMPEG_BIN_DIR) + os.pathsep + env.get("PATH", "")
+    env["PATH"] = str(_ffmpeg_bin_dir()) + os.pathsep + env.get("PATH", "")
     return env
 
 

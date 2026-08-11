@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getPrismaClient } from "@/server/prisma";
+import prisma from "@/lib/prisma";
 import { getServerSession } from "@/server/session";
 
 // GET /api/preferences - Get user preferences
@@ -14,7 +14,6 @@ export async function GET() {
       );
     }
 
-    const prisma = getPrismaClient();
     const user = await prisma.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -94,7 +93,6 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const prisma = getPrismaClient();
     const updatedUser = await prisma.user.update({
       where: { id: session.user.id },
       data: {

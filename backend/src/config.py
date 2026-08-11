@@ -8,6 +8,13 @@ load_dotenv()
 _config_override = None
 LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
+# Legacy fallback for the bundled ffmpeg install on the original dev machine.
+# Kept as the default so existing local behavior is unchanged unless
+# FFMPEG_BIN_DIR is explicitly set in the environment.
+DEFAULT_FFMPEG_BIN_DIR = (
+    r"C:\Users\teuku\AppData\Local\Programs\ffmpeg\ffmpeg-9.0-essentials_build\bin"
+)
+
 
 class Config:
     def __init__(self):
@@ -56,6 +63,9 @@ class Config:
         self.clip_duration = int(os.getenv("CLIP_DURATION", "30"))  # seconds
 
         self.temp_dir = os.getenv("TEMP_DIR", "temp")
+        self.ffmpeg_bin_dir = (
+            self.get_optional_env("FFMPEG_BIN_DIR") or DEFAULT_FFMPEG_BIN_DIR
+        )
 
         # Redis configuration
         self.redis_host = os.getenv("REDIS_HOST", "localhost")
@@ -111,6 +121,14 @@ class Config:
 
         normalized = value.strip()
         return normalized or None
+
+    def get_optional_env(self, name: str) -> str | None:
+        """Public accessor for an optional environment variable.
+
+        Delegates to _get_optional_env so callers outside this module never
+        reach into the private helper directly.
+        """
+        return self._get_optional_env(name)
 
     @classmethod
     def _get_runtime_setting(cls, name: str):

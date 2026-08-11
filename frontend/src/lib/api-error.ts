@@ -66,3 +66,11 @@ export function formatSupportMessage({ message, traceId }: ApiErrorInfo): string
 
   return `${message} (Trace ID: ${traceId})`;
 }
+
+export async function buildSupportError(
+  response: Response,
+  fallbackMessage: string
+): Promise<string> {
+  const parsed = await parseApiError(response, fallbackMessage);
+  return formatSupportMessage(parsed);
+}

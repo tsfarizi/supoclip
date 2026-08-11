@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { buildBackendAuthHeaders } from "@/lib/backend-auth";
 import { monetizationEnabled } from "@/lib/monetization";
+import prisma from "@/lib/prisma";
 import { fetchBackend } from "@/server/backend-api";
 import { getPlanIdForStripePrice, hasAnyConfiguredStripePrice } from "@/server/billing-plans";
-import { getPrismaClient } from "@/server/prisma";
 import { getServerStripeClient } from "@/server/stripe";
 import Stripe from "stripe";
 
@@ -50,7 +50,6 @@ function getSubscriptionPeriod(subscription: Stripe.Subscription): {
 }
 
 async function upsertSubscriptionState(subscription: Stripe.Subscription) {
-  const prisma = getPrismaClient();
   const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
   const subscriptionId = subscription.id;
   const status = subscription.status;
@@ -115,7 +114,6 @@ async function sendSubscriptionEmailBestEffort(
 }
 
 async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
-  const prisma = getPrismaClient();
   if (session.mode !== "subscription") {
     return;
   }
@@ -160,7 +158,6 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
 }
 
 async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
-  const prisma = getPrismaClient();
   const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
   const user = await prisma.user.findFirst({
     where: { stripe_customer_id: customerId },
@@ -218,7 +215,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    await getPrismaClient().stripeWebhookEvent.create({
+    await prisma.stripeWebhookEvent.create({
       data: {
         id: event.id,
         type: event.type,
@@ -245,7 +242,7 @@ export async function POST(request: Request) {
       await handleSubscriptionDeleted(event.data.object as Stripe.Subscription);
     }
   } catch (error) {
-    await getPrismaClient().stripeWebhookEvent.delete({ where: { id: event.id } }).catch(() => {});
+    await prisma.stripeWebhookEvent.delete({ where: { id: event.id } }).catch(() => {});
     throw error;
   }
 
