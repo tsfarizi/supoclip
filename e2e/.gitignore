@@ -1,0 +1,6 @@
+node_modules/
+test-results/
+playwright-report/
+.credentials.json
+.fixtures.json
+storageState.json
