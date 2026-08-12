@@ -2786,17 +2786,17 @@ def build_smooth_pan_expression(keys: List[Tuple[float, int]]) -> str:
     return f"trunc(({expr})/2)*2"
 
 
-# Scene-aware vertical layout tuning. A shot is a "face shot" (tracked crop) if a
-# face is detected in at least FACE_PRESENCE_RATE of frames over a short window —
-# this keeps far-away/small talking-head faces as crops while only flagging true
-# content (tweets/graphs with NO face) as full-frame fit. A tiny area floor
-# rejects single-pixel false positives. Short layout islands are merged so the
-# layout doesn't flicker, and switch points snap to nearby scene cuts.
+# Scene-aware vertical layout tuning. A scene (span between two scene cuts) is
+# classified once by face-presence MAJORITY over its frames: "face" (tracked
+# crop) when a face is detected in at least FACE_PRESENCE_RATE of the scene's
+# frames, otherwise "fit" (full-frame blurred-background fit). A tiny area floor
+# rejects single-pixel false positives. Runs are emitted per scene, so the
+# aspect ratio only changes at a scene boundary — never mid-scene.
 FACE_PRESENCE_MIN_AREA = 0.002
 FACE_RATE_WINDOW = 2.0
 FACE_PRESENCE_RATE = 0.25
-# Only switch to the full-frame fit for genuinely sustained content shots, so a
-# brief detection drop while talking never causes a jarring zoom-out.
+# Legacy window-smoothing / short-run debounce / scene-snap constants. The
+# per-scene algorithm supersedes them; kept defined for backwards compatibility.
 MIN_LAYOUT_SECONDS = 1.5
 LAYOUT_SNAP_WINDOW = 0.6
 
@@ -2808,77 +2808,53 @@ def build_layout_plan(
 ) -> List[Dict[str, Any]]:
     """Classify a clip into 'face' (tracked crop) and 'fit' (full-frame) shots.
 
-    Talking-head shots become a tracked crop; content shots (tweets, graphs,
-    code — no real face) become a full-frame blurred-background fit so nothing
-    is cropped off. Boundaries are debounced and snapped to scene cuts.
+    One decision per scene: a scene whose frames carry a face in at least
+    FACE_PRESENCE_RATE of them becomes a tracked crop; otherwise it is a
+    full-frame blurred-background fit (tweets/graphs/code with no real face).
+    Runs are emitted exactly on scene boundaries, so the aspect ratio only
+    changes at a scene cut — never mid-scene.
     """
     if duration <= 0 or not track:
         return [{"start": 0.0, "end": max(0.0, duration), "kind": "face"}]
 
-    times = [t for t, _, _ in track]
-    present = [
-        1 if (c is not None and a >= FACE_PRESENCE_MIN_AREA) else 0
-        for _, c, a in track
-    ]
+    boundaries = (
+        [0.0]
+        + [c for c in (scene_cuts or []) if 0.05 < c < duration - 0.05]
+        + [duration]
+    )
 
-    # Classify by face-presence RATE over a window: a real talking shot has a
-    # face in many frames (even if small/spotty); a content shot has ~none.
-    diffs = [times[i] - times[i - 1] for i in range(1, len(times))]
-    dt = sorted(diffs)[len(diffs) // 2] if diffs else 0.25
-    half = max(1, int(round(FACE_RATE_WINDOW / 2.0 / max(dt, 0.05))))
-    smoothed: List[int] = []
-    for i in range(len(present)):
-        seg = present[max(0, i - half) : min(len(present), i + half + 1)]
-        rate = sum(seg) / len(seg)
-        smoothed.append(1 if rate >= FACE_PRESENCE_RATE else 0)
-
-    # Build runs of constant layout value.
-    runs: List[List[float]] = []
-    run_start, run_val = 0.0, smoothed[0]
-    for i in range(1, len(times)):
-        if smoothed[i] != run_val:
-            runs.append([run_start, times[i], run_val])
-            run_start, run_val = times[i], smoothed[i]
-    runs.append([run_start, duration, run_val])
-
-    def coalesce(rs: List[List[float]]) -> List[List[float]]:
-        out = [rs[0][:]]
-        for r in rs[1:]:
-            if r[2] == out[-1][2]:
-                out[-1][1] = r[1]
-            else:
-                out.append(r[:])
-        return out
-
-    # Merge any run shorter than the minimum layout duration (flip + coalesce).
-    runs = coalesce(runs)
-    changed = True
-    while changed and len(runs) > 1:
-        changed = False
-        for r in runs:
-            if r[1] - r[0] < MIN_LAYOUT_SECONDS:
-                r[2] = 1 - r[2]
-                changed = True
+    # Bucket each frame into its scene (frames outside [0, duration) land in the
+    # first scene), then decide each scene by face-presence majority.
+    scene_present: List[List[int]] = [[] for _ in range(len(boundaries) - 1)]
+    for t, c, a in track:
+        present = 1 if (c is not None and a >= FACE_PRESENCE_MIN_AREA) else 0
+        idx = 0
+        for i in range(len(boundaries) - 1):
+            if boundaries[i] <= t < boundaries[i + 1]:
+                idx = i
                 break
-        if changed:
-            runs = coalesce(runs)
+        scene_present[idx].append(present)
 
-    # Snap internal boundaries to nearby scene cuts for clean switches.
-    cuts = sorted(c for c in (scene_cuts or []) if 0.05 < c < duration - 0.05)
-    for i in range(len(runs) - 1):
-        boundary = runs[i][1]
-        near = [c for c in cuts if abs(c - boundary) <= LAYOUT_SNAP_WINDOW]
-        if not near:
-            continue
-        snapped = min(near, key=lambda c: abs(c - boundary))
-        if runs[i][0] + 0.1 < snapped < runs[i + 1][1] - 0.1:
-            runs[i][1] = snapped
-            runs[i + 1][0] = snapped
+    kinds: List[str] = []
+    for present in scene_present:
+        if present:
+            rate = sum(present) / len(present)
+            kinds.append("face" if rate >= FACE_PRESENCE_RATE else "fit")
+        else:
+            # Empty scene inherits the previous scene's decision; the opening
+            # scene defaults to face when it has no frames.
+            kinds.append(kinds[-1] if kinds else "face")
 
-    return [
-        {"start": r[0], "end": r[1], "kind": "face" if r[2] == 1 else "fit"}
-        for r in runs
-    ]
+    runs: List[Dict[str, Any]] = []
+    for i, kind in enumerate(kinds):
+        if runs and runs[-1]["kind"] == kind:
+            runs[-1]["end"] = boundaries[i + 1]
+        else:
+            runs.append(
+                {"start": boundaries[i], "end": boundaries[i + 1], "kind": kind}
+            )
+
+    return runs or [{"start": 0.0, "end": duration, "kind": "face"}]
 
 
 # Ken Burns punch-in for static crops: a barely-perceptible push toward the
