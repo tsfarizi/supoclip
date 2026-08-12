@@ -113,8 +113,15 @@ def test_build_keep_ranges_from_source_ranges_recomputes_each_range(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_create_single_clip_keeps_timing_fields_consistent(monkeypatch, tmp_path):
-    async def fake_run_in_thread(_fn, *_args, **_kwargs):
-        return True
+    async def fake_run_in_thread(fn, *_args, **_kwargs):
+        # Simulate a successful clip render (returns True) but a no-op B-roll
+        # pass (returns None, matching apply_broll_suggestions_to_clip when
+        # there are no suggestions); a truthy broll result would make
+        # create_single_clip unlink/rename a clip file that the mocked render
+        # never created.
+        if fn.__name__ == "create_optimized_clip":
+            return True
+        return None
 
     monkeypatch.setattr("src.services.video_service.run_in_thread", fake_run_in_thread)
     monkeypatch.setattr(

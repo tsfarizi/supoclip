@@ -53,6 +53,27 @@ def test_database_url():
     return os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def ffmpeg_bin_dir_on_path():
+    """Prepend Config().ffmpeg_bin_dir to PATH so subprocess shells to
+    `ffmpeg`/`ffprobe` resolve without those binaries being on the system PATH.
+
+    Video-processing tests exercise code that shells out to ffmpeg/ffprobe
+    (e.g. ffprobe_duration), which fails with WinError 2 when the bundled
+    ffmpeg install lives outside PATH. Only prepend when the directory exists;
+    restore the original PATH after the session so no test-order coupling leaks.
+    """
+    ffmpeg_dir = str(Config().ffmpeg_bin_dir)
+    original_path = os.environ.get("PATH", "")
+    if ffmpeg_dir and os.path.isdir(ffmpeg_dir):
+        if ffmpeg_dir not in original_path.split(os.pathsep):
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + original_path
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = original_path
+
+
 @pytest.fixture(scope="session")
 async def initialized_database(test_database_url):
     if not test_database_url:

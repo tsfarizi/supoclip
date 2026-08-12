@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch
 from pathlib import Path
 
@@ -271,7 +272,21 @@ def test_burn_ass_subtitles_passes_selected_fonts_dir(tmp_path):
 
     assert success is True
     video_filter = commands[0][commands[0].index("-vf") + 1]
-    assert f"fontsdir={tmp_path / 'fonts'}" in video_filter
+    fonts_dir = tmp_path / "fonts"
+    if os.name == "nt":
+        # ffmpeg filter option parser requires drive colons escaped (\\:) and
+        # backslashes normalized to forward slashes (documented in
+        # video_utils.ffmpeg_escape_filter_value).
+        expected_fontsdir = (
+            str(fonts_dir)
+            .replace("\\", "/")
+            .replace(":", "\\\\:")
+            .replace("'", "\\'")
+            .replace(" ", "\\ ")
+        )
+    else:
+        expected_fontsdir = str(fonts_dir)
+    assert f"fontsdir={expected_fontsdir}" in video_filter
     assert video_filter.endswith(",setsar=1")
 
 

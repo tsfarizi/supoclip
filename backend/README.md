@@ -9,7 +9,7 @@ Ensure you have `ffmpeg` installed.
 brew install ffmpeg
 
 # Linux (Ubuntu)
-sudo apt update -y && sudo apt install install ffmpeg -y
+sudo apt update -y && sudo apt install ffmpeg -y
 
 # Windows (Chocolatey https://chocolatey.org/)
 choco install ffmpeg
@@ -53,7 +53,7 @@ Notes:
 - `TEST_DATABASE_URL` should point at a disposable local test database.
 - Redis is only required for the integration paths that validate queue and health behavior.
 - Coverage thresholds are enforced in `pyproject.toml` during the test run.
-- For repo-level entrypoints, use `make test-backend` or `make test-ci` from the repository root.
+- To run the suite from the repository root, use `cd backend && uv run pytest` (set `TEST_DATABASE_URL` when the integration paths need a disposable database).
 
 ## Email Configuration
 
