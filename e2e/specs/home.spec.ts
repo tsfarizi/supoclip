@@ -59,7 +59,7 @@ test.describe("home (authenticated)", () => {
     await expect(processButton).toBeEnabled();
     await processButton.click();
     await expect(
-      page.getByText(/only youtube urls or upload:\/\/ references are supported/i),
+      page.getByText(/source url is not a supported video link/i),
     ).toBeVisible({ timeout: 20000 });
   });
 

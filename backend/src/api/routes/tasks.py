@@ -17,6 +17,7 @@ from ...database import get_db
 from ...database import AsyncSessionLocal
 from ...services.task_service import TaskService
 from ...services.billing_service import BillingService, BillingLimitExceeded
+from ...errors import InvalidSourceError
 from ...auth_headers import resolve_authenticated_user_id
 from ...workers.job_queue import JobQueue
 from ...workers.progress import ProgressTracker
@@ -316,6 +317,13 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             "message": "Task created and queued for processing",
         }
 
+    except InvalidSourceError:
+        # Client supplied a URL that is neither a YouTube link nor an
+        # upload:// reference; this is invalid input, not a missing resource.
+        raise HTTPException(
+            status_code=400,
+            detail="Source URL is not a supported video link. Use a YouTube URL or an uploaded video.",
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:

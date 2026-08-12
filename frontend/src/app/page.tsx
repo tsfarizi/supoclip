@@ -51,7 +51,7 @@ const structuredData = [
     "@type": "SoftwareApplication",
     name: "SupoClip",
     applicationCategory: "MultimediaApplication",
-    operatingSystem: "Web, Docker",
+    operatingSystem: "Web",
     url: siteUrl,
     description:
       "An open-source AI video clipper for finding highlights, creating vertical crops, adding word-synced captions, and exporting short-form videos.",

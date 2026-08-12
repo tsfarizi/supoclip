@@ -32,3 +32,12 @@ class RenderError(TaskProcessingError):
 
 class CancelledError(TaskProcessingError):
     """Task was cancelled by the user."""
+
+
+class InvalidSourceError(ValueError):
+    """Source URL is not a supported video link (neither YouTube nor upload://).
+
+    Raised at task creation time from client input validation, so it subclasses
+    ValueError (idiomatic bad-input signal) instead of the processing pipeline
+    taxonomy: it never fires inside process_task.
+    """

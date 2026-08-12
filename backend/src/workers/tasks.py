@@ -134,6 +134,12 @@ async def process_video_task(
 
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+            # No session may return to the pool with an open transaction:
+            # roll back whatever the failure left behind (no-op when clean).
+            try:
+                await db.rollback()
+            except Exception:
+                pass
             try:
                 job_try = int(ctx.get("job_try", 1))
                 max_tries = int(getattr(WorkerSettings, "max_tries", 3))

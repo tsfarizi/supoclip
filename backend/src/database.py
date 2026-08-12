@@ -89,6 +89,13 @@ async def get_db():
         try:
             yield session
         finally:
+            # Never return a session to the pool with an open transaction:
+            # a handler failure can leave one aborted. Roll back first; close
+            # then releases the connection (no-op when the session is clean).
+            try:
+                await session.rollback()
+            except Exception:
+                pass
             await session.close()
 
 

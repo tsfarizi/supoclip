@@ -819,7 +819,7 @@ export default function LandingPage() {
                   </div>
                   <div>
                     <span className="opacity-50">$</span>{" "}
-                    docker-compose up -d
+                    .\run.ps1
                   </div>
                 </div>
 

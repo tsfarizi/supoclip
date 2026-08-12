@@ -11,6 +11,7 @@ Each test targets exactly one clause of the tasks API contract:
 - GET /tasks/shared/{token} : 404 unknown token / 200 repo-enabled completed / 404 enabled-but-incomplete (6a-6c)
 - POST /tasks/{id}/cancel   : 200 for queued task, marks cancelled (7)
 - POST /tasks/              : 400 when source.url is missing (10)
+- POST /tasks/              : 400 when source.url is not a supported link (11)
 
 State is seeded through repositories/factories, never through POST /tasks/
 (which depends on the queue adapter), keeping each test deterministic and
@@ -18,6 +19,10 @@ independent of any single queue adapter implementation.
 """
 
 from uuid import uuid4
+
+import hashlib
+import hmac
+import time
 
 import pytest
 
@@ -321,3 +326,58 @@ async def test_create_task_without_source_url_returns_400(client, db_session, au
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Source URL is required"
+
+
+@pytest.mark.asyncio
+async def test_create_task_invalid_source_url_returns_400(
+    client, db_session, auth_headers
+):
+    """Contract 11: POST /tasks/ with a URL that is neither a YouTube link nor
+    an upload:// reference must be rejected with 400 Bad Request (invalid client
+    input), never 404 which is reserved for missing resources (e.g. unknown
+    user)."""
+    await create_user(db_session, user_id="user-1", email="owner@example.com")
+
+    response = await client.post(
+        "/tasks/",
+        headers=auth_headers,
+        json={"source": {"url": "https://example.com/not-a-video"}},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.json()["detail"]
+        == "Source URL is not a supported video link. Use a YouTube URL or an uploaded video."
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_task_unknown_user_returns_404_not_400(
+    client, db_session
+):
+    """Contract 11 inverse: the 400 for unsupported source URLs must not swallow
+    the existing 404 for a missing user  both are ValueError-derived at the
+    service layer and must stay disambiguated at the route.
+
+    A unique user id is signed directly so the test does not depend on whether
+    other tests in the session have already created the fixture's user-1."""
+    unknown_user_id = f"ghost-{uuid4()}"
+    timestamp = str(int(time.time()))
+    payload = f"{unknown_user_id}:{timestamp}".encode("utf-8")
+    signature = hmac.new(
+        b"test-backend-auth-secret", payload, hashlib.sha256
+    ).hexdigest()
+    headers = {
+        "x-supoclip-user-id": unknown_user_id,
+        "x-supoclip-ts": timestamp,
+        "x-supoclip-signature": signature,
+    }
+
+    response = await client.post(
+        "/tasks/",
+        headers=headers,
+        json={"source": {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"User {unknown_user_id} not found"

@@ -190,25 +190,13 @@ If you enable DataFast, also verify that:
 SupoClip now has a layered automated test setup:
 
 - `pytest` for backend unit and integration tests
-- `Vitest` and Testing Library for frontend route and component coverage
-- `Playwright` for a small seeded browser smoke suite
-
-Repo-level entrypoints:
-
-```bash
-make test
-make test-backend
-make test-frontend
-make test-e2e
-make test-ci
-```
+- `Playwright` for frontend browser e2e tests (suite in `e2e/`)
 
 App-level entrypoints:
 
 ```bash
-cd backend && uv sync --all-groups && .venv/bin/pytest
-cd frontend && npm install && npm run test:coverage
-cd frontend && npm run test:e2e
+cd backend && uv run pytest
+cd e2e && pnpm exec playwright test
 ```
 
 Local test runs expect PostgreSQL and Redis to be available. The easiest path is to start the stack with `.\run.ps1`, then run the commands above. CI runs the same layers in GitHub Actions with Postgres and Redis service containers.

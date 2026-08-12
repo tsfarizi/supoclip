@@ -88,16 +88,16 @@ e2e/
   404 muncul di console, dicatat di output spec.
 - **Kebocoran sesi DB saat worker memproses upload dummy**: `upload.spec.ts`
   sengaja mengupload file teks bernama `.mp4`; bila worker aktif, worker akan
-  mencoba memprosesnya dan gagal. Jalur error worker ini meninggalkan sesi
-  Postgres `idle in transaction` (query `generated_clips`) yang tidak
-  ditutup — setelah beberapa run, pool DB penuh dan endpoint backend yang
-  menyentuh DB (mis. `/tasks/`) hang padahal `/health` tetap healthy. Ini
-  **bug ketahanan aplikasi (bukan bug suite)**. Pemulihan:
+  mencoba memprosesnya dan gagal. **Sudah diperbaiki (F1)**: jalur error
+  worker kini me-rollback sesi sebelum melempar (`_persist_terminal_status` di
+  `task_service.py` + `db.rollback()` di `workers/tasks.py` + rollback di
+  `get_db`), sehingga tidak ada sesi yang kembali ke pool dalam keadaan
+  `idle in transaction`. Regresi dicegah oleh test unit F1 di
+  `tests/unit/test_task_service.py`. Cara verifikasi manual bila perlu:
   ```
-  psql -h localhost -p 5433 -U supoclip -d supoclip -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction';"
+  psql -h localhost -p 5433 -U supoclip -d supoclip -t -A -c "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction'"
   ```
-  atau restart backend + worker (mis. lewat `stop.ps1` + `run.ps1`). Suite
-  tetap deterministik; `upload.spec` menghapus task yang dibuatnya sendiri.
+  Harus tetap `0` setelah beberapa run upload spec.
 - Concurrency dimatikan (`workers: 1`, `fullyParallel: false`) karena spec
   berbagi DB user yang sama dan urutan state (share/API key/task) harus serial.
 

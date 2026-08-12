@@ -1115,3 +1115,205 @@ async def test_find_active_task_for_source_empty_url_skips_query():
 
     assert found is None
     service.task_repo.get_active_tasks_with_sources.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Regression: process_task error paths must not leave an open/aborted
+# transaction on the session (F1: Postgres `idle in transaction` leak).
+# ---------------------------------------------------------------------------
+
+
+class _FakeDbWithAbortedTransaction:
+    """AsyncSession stand-in that records rollback and reports txn state.
+
+    Starts inside an aborted transaction (the state left behind when the
+    original pipeline error is itself a DB failure) so the error handler must
+    roll back before writing the terminal status.
+    """
+
+    def __init__(self, in_transaction: bool = True):
+        self.rollback_calls = 0
+        self._in_transaction = in_transaction
+
+    def in_transaction(self) -> bool:
+        return self._in_transaction
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
+        self._in_transaction = False
+
+
+def _build_failing_service(db) -> TaskService:
+    service = build_task_service()
+    service.db = db
+    service.video_service.process_video_complete = AsyncMock(
+        side_effect=RuntimeError("simulated pipeline failure")
+    )
+    return service
+
+
+@pytest.mark.asyncio
+async def test_process_task_error_path_rolls_back_open_transaction():
+    db = _FakeDbWithAbortedTransaction(in_transaction=True)
+    service = _build_failing_service(db)
+
+    with pytest.raises(RuntimeError, match="simulated pipeline failure"):
+        await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
+
+    # The handler rolled the aborted transaction back before writing status...
+    assert db.rollback_calls >= 1
+    assert db.in_transaction() is False
+    # ...and the status transition still happened.
+    service.task_repo.update_task_status.assert_any_await(
+        service.db,
+        "task-1",
+        "error",
+        progress=0,
+        progress_message="simulated pipeline failure",
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_task_error_path_rolls_back_even_when_clean():
+    db = _FakeDbWithAbortedTransaction(in_transaction=False)
+    service = _build_failing_service(db)
+
+    with pytest.raises(RuntimeError, match="simulated pipeline failure"):
+        await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
+
+    # Even on an already-clean session the handler rolls back before writing,
+    # so the invariant "no open transaction" holds without relying on the
+    # caller's close().
+    assert db.rollback_calls >= 1
+    assert db.in_transaction() is False
+    service.task_repo.update_task_status.assert_any_await(
+        service.db,
+        "task-1",
+        "error",
+        progress=0,
+        progress_message="simulated pipeline failure",
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_task_error_path_never_masks_original_when_status_write_fails():
+    db = _FakeDbWithAbortedTransaction(in_transaction=True)
+    service = _build_failing_service(db)
+
+    # The first update_task_status (the "processing" transition inside the try
+    # block) must succeed; only the error handler's status write may fail.
+    status_calls = {"count": 0}
+
+    async def flaky_status_write(*_args, **_kwargs):
+        status_calls["count"] += 1
+        if status_calls["count"] > 1:
+            raise RuntimeError("status write exploded")
+
+    service.task_repo.update_task_status = AsyncMock(side_effect=flaky_status_write)
+
+    # The original pipeline error must propagate even though persisting the
+    # terminal status failed; the session must still be rolled back clean.
+    with pytest.raises(RuntimeError, match="simulated pipeline failure"):
+        await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
+
+    assert db.rollback_calls >= 1
+    assert db.in_transaction() is False
+
+
+@pytest.mark.asyncio
+async def test_process_video_task_worker_rolls_back_before_reraise(monkeypatch):
+    """F1 regression at the worker boundary: when the pipeline fails,
+    process_video_task must roll the session back before re-raising so no
+    connection ever returns to the pool with an open transaction.
+
+    The service-level rollback (see _persist_terminal_status) already runs in
+    process_task; this test pins the worker's own defensive rollback too.
+    """
+    from src.workers.tasks import process_video_task
+
+    class _WorkerFakeDb:
+        def __init__(self):
+            self.rollback_calls = 0
+            self.closed = False
+
+        def in_transaction(self) -> bool:
+            return False
+
+        async def rollback(self) -> None:
+            self.rollback_calls += 1
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _WorkerFakeSessionFactory:
+        """Yields one fake session per `async with AsyncSessionLocal()`."""
+
+        def __init__(self):
+            self.db = _WorkerFakeDb()
+
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return self.db
+
+        async def __aexit__(self, *_exc):
+            await self.db.close()
+            return False
+
+    factory = _WorkerFakeSessionFactory()
+    monkeypatch.setattr("src.database.AsyncSessionLocal", factory)
+    monkeypatch.setattr(
+        "src.runtime_settings.load_runtime_settings_cache", AsyncMock()
+    )
+
+    class _FakeTaskService:
+        def __init__(self, db):
+            self.db = db
+
+        async def process_task(self, **_kwargs):
+            raise RuntimeError("pipeline failed")
+
+    monkeypatch.setattr(
+        "src.services.task_service.TaskService", _FakeTaskService
+    )
+
+    class _CtxRedis:
+        async def get(self, _key):
+            return None
+
+        async def set(self, *_args, **_kwargs):
+            return True
+
+        async def sadd(self, *_args, **_kwargs):
+            return 1
+
+        async def publish(self, *_args, **_kwargs):
+            return 1
+
+        async def setex(self, *_args, **_kwargs):
+            return True
+
+    with pytest.raises(RuntimeError, match="pipeline failed"):
+        await process_video_task(
+            {"redis": _CtxRedis(), "job_try": 1},
+            "task-1",
+            "upload://dummy.mp4",
+            "video_url",
+            "user-1",
+        )
+
+    assert factory.db.rollback_calls >= 1
+    assert factory.db.closed is True

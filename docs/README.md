@@ -13,7 +13,7 @@ If you are new to the project, start here:
 ## Documentation Map
 
 - [Setup](./setup.md)
-  - Docker-first installation
+  - Native one-command installation
   - Local development commands
   - First-run checklist
   - Production-minded setup notes

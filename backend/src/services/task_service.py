@@ -374,7 +374,9 @@ class TaskService:
                     hook_type=clip_info.get("hook_type"),
                     hook_title=clip_info.get("hook_title"),
                 )
-                await self.db.commit()
+                # ClipRepository.create_clip owns its commit (it mirrors
+                # TaskRepository.create_task); no second commit here so the
+                # caller never commits across the repository's boundary.
                 clip_ids.append(clip_id)
 
                 # Update task's clip IDs array
@@ -430,19 +432,15 @@ class TaskService:
 
         except CancelledError as e:
             logger.error(f"Error processing task {task_id}: {e}")
-            await self.task_repo.update_task_status(
-                self.db,
-                task_id,
-                "cancelled",
-                progress=0,
+            await self._persist_terminal_status(
+                task_id=task_id,
+                status="cancelled",
                 progress_message="Cancelled by user",
+                error_code=None,
             )
             raise
         except TaskProcessingError as e:
             logger.error(f"Error processing task {task_id}: {e}")
-            await self.task_repo.update_task_status(
-                self.db, task_id, "error", progress=0, progress_message=str(e)
-            )
             error_code = "task_error"
             if isinstance(e, DownloadError):
                 error_code = "download_error"
@@ -453,18 +451,15 @@ class TaskService:
             elif isinstance(e, RenderError):
                 error_code = "task_error"
 
-            await self.task_repo.update_task_runtime_metadata(
-                self.db,
-                task_id,
-                completed_at=datetime.utcnow(),
+            await self._persist_terminal_status(
+                task_id=task_id,
+                status="error",
+                progress_message=str(e),
                 error_code=error_code,
             )
             raise
         except Exception as e:
             logger.error(f"Error processing task {task_id}: {e}")
-            await self.task_repo.update_task_status(
-                self.db, task_id, "error", progress=0, progress_message=str(e)
-            )
             error_code = "task_error"
             message = str(e).lower()
             if "download" in message or "youtube" in message:
@@ -476,13 +471,64 @@ class TaskService:
             elif "cancelled" in message:
                 error_code = "cancelled"
 
-            await self.task_repo.update_task_runtime_metadata(
-                self.db,
-                task_id,
-                completed_at=datetime.utcnow(),
+            await self._persist_terminal_status(
+                task_id=task_id,
+                status="error",
+                progress_message=str(e),
                 error_code=error_code,
             )
             raise
+
+    async def _persist_terminal_status(
+        self,
+        *,
+        task_id: str,
+        status: str,
+        progress_message: str,
+        error_code: str | None,
+    ) -> None:
+        """Persist the terminal status transition without leaking a transaction.
+
+        Runs inside process_task's error handlers. If the pipeline failure
+        aborted the session's transaction (a DB error was the original
+        exception), the handler's own writes would fail with
+        PendingRollbackError and mask that original error; roll the aborted
+        transaction back first so the status write runs in a clean
+        transaction. A failure while persisting the status is swallowed only
+        after another rollback, so the original pipeline exception is never
+        masked and no transaction is left open on the session.
+        """
+        try:
+            # Always roll the current transaction back before writing the
+            # terminal status: after a DB-level pipeline failure the session
+            # is aborted and the write would fail with PendingRollbackError,
+            # masking the original error. Rollback is a no-op on a clean
+            # session, so this cannot discard committed work.
+            await self.db.rollback()
+            await self.task_repo.update_task_status(
+                self.db,
+                task_id,
+                status,
+                progress=0,
+                progress_message=progress_message,
+            )
+            if error_code is not None:
+                await self.task_repo.update_task_runtime_metadata(
+                    self.db,
+                    task_id,
+                    completed_at=datetime.utcnow(),
+                    error_code=error_code,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to persist terminal status %s for task %s; rolling back",
+                status,
+                task_id,
+            )
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
 
     async def _send_completion_notification_if_needed(
         self, *, task_id: str, clips_count: int

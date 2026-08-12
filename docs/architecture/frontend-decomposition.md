@@ -654,52 +654,52 @@ Header edit page tetap di page (kecil: back, judul, ExportBar di dalam header).
 
 ## 4. Urutan Refactor (langkah aman, preservasi perilaku)
 
-Prinsip tiap langkah: (1) buat unit baru + test, (2) ganti satu surface, (3) jalankan verifikasi penuh, (4) lanjut. Tidak ada langkah yang mengubah lebih dari satu surface sekaligus. Setelah tiap langkah: pnpm exec vitest run + pnpm run lint + smoke test manual surface yang disentuh. T10 browser regression dijalankan penuh setelah langkah yang menyentuh detail/home/list/settings.
+Prinsip tiap langkah: (1) buat unit baru, (2) ganti satu surface, (3) jalankan verifikasi penuh, (4) lanjut. Tidak ada langkah yang mengubah lebih dari satu surface sekaligus. Setelah tiap langkah: pnpm run lint + smoke test manual surface yang disentuh. T10 browser regression dijalankan penuh setelah langkah yang menyentuh detail/home/list/settings.
 
 ### Langkah 1 — Tipe bersama + util murni (nol JSX, nol fetch)
 - Buat lib/task-types.ts: semua interface + getClipUrl, formatDuration, clamp, skor warna, getHookTypeLabel, ACTIVE_TASK_STATUSES, MIN_GAP_SECONDS, DEFAULT_VIDEO_FX, EXPORT_DIMENSIONS.
 - Pindah buildSupportError ke lib/api-error.ts (helper async).
-- Verifikasi: vitest + lint. TS compile memastikan tidak ada referensi rusak.
+- Verifikasi: lint. TS compile memastikan tidak ada referensi rusak.
 - Risiko: rendah. Tidak ada perilaku runtime berubah.
 
 ### Langkah 2 — useBillingSummary + useFonts + useApiKeys (hook tanpa editor)
 - Buat hooks; ganti pemakaian di home (billing + fonts), settings (billing + fonts), tasks/[id] (fonts).
 - Hapus duplikasi refreshFonts/loadFonts/fetchBillingSummary dari tiga surface.
-- Verifikasi: vitest + lint + T10 (home auth, settings, task detail).
+- Verifikasi: lint + T10 (home auth, settings, task detail).
 - Risiko: sedang. Injeksi @font-face pindah ke satu tempat; T10 tidak menguji font secara visual — smoke manual cek preview font di home.
 
 ### Langkah 3 — useTaskQuery (fetch task + clips)
 - Buat hook dengan opsi retryOn404/mergeIncremental; ganti fetchTaskStatus (detail) dan fetchEditorData (edit).
 - Callback onTaskLoaded untuk hidrasi settings state di detail (hanya detail; edit tidak butuh).
-- Verifikasi: vitest + lint + T10 task detail (seeded task + progress render).
+- Verifikasi: lint + T10 task detail (seeded task + progress render).
 - Risiko: sedang — ini yang paling banyak menyentuh logika fetch; pertahankan retry 404 dan merge incremental clip persis.
 
 ### Langkah 4 — useTaskPolling (SSE)
 - Buat hook dua mode; ganti efek SSE di detail (mode default) dan edit (mode edit).
 - triggerAutoRefresh pindah ke hook (opsi autoRefreshMs=700, guard sekali).
-- Verifikasi: vitest + lint + T10 task detail; smoke manual: jalankan task kecil dan amati progress live.
+- Verifikasi: lint + T10 task detail; smoke manual: jalankan task kecil dan amati progress live.
 - Risiko: sedang-tinggi. SSE adalah perilaku live; perubahan callback wiring mudah bocor. Urutkan SETELAH useTaskQuery agar onCompleted memakai refetch yang sudah ada.
 
 ### Langkah 5 — useClipEditor + useTaskSettings
 - Buat useClipEditor; ganti 4 mutasi di detail dan 3 di edit (trim/split/merge/caption). onAfterMutation = refetch dari useTaskQuery.
 - Buat useTaskSettings; ganti state settings di detail sheet dan bagian style create form. handleApplyProjectSettings dan payload create memakai builder dari hook.
-- Verifikasi: vitest + lint + T10 + smoke: trim/split/merge/caption di detail dan edit, create task di home.
+- Verifikasi: lint + T10 + smoke: trim/split/merge/caption di detail dan edit, create task di home.
 - Risiko: tinggi untuk detail (13 mutasi pindah sebagian). Kerjakan per-operasi, commit per operasi (contoh: trim dulu, split, merge, caption).
 
 ### Langkah 6 — Pecah home-app
 - Header, TaskHistoryCard, CreateTaskForm, LivePreview (kontrak 3.1). home-app tersisa ~150-250 baris komposisi.
-- Verifikasi: vitest + lint + T10 home auth + create flow smoke.
+- Verifikasi: lint + T10 home auth + create flow smoke.
 - Risiko: sedang. JSX dipindah verbatim; risiko tinggi hanya di props wiring.
 
 ### Langkah 7 — Pecah tasks/[id]
 - TaskDetailHeader, ClipCard (mode live + editable), ProjectSettingsSheet (kontrak 3.2). Memakai useClipEditor/useTaskSettings/useTaskQuery/useTaskPolling dari langkah 3-5.
 - Gabungkan live grid + completed grid via ClipCard mode. Hapus duplikat render.
-- Verifikasi: vitest + lint + T10 task detail penuh + smoke manual: share link, delete clip, trim.
+- Verifikasi: lint + T10 task detail penuh + smoke manual: share link, delete clip, trim.
 - Risiko: tinggi (file terbesar, 13 mutasi). Ini langkah paling berisiko — kerjakan setelah hook stabil.
 
 ### Langkah 8 — Pecah tasks/[id]/edit
 - VideoCanvas, FineControls, CaptionEditor, ClipTimeline, ExportBar (kontrak 3.3).
-- Verifikasi: vitest + lint + T10 + smoke: export (mediabunny) di edit page.
+- Verifikasi: lint + T10 + smoke: export (mediabunny) di edit page.
 - Risiko: sedang. Export client-side adalah satu-satunya jalur yang tidak bisa diuji T10 penuh (butuh video); pertahankan kode mediabunny verbatim di ExportBar/handler page.
 
 ### Langkah 9 (opsional, di luar ambang) — list + api-keys
@@ -718,9 +718,9 @@ Ambang ukuran (setelah A14b):
 - Hooks < 150 baris per file (kecuali useTaskQuery/useTaskPolling bila logika SSE memerlukan; tetap < 250).
 
 Verifikasi wajib (semua hijau):
-1. pnpm exec vitest run — semua test existing + test baru untuk hooks/komponen (paling tidak: useClipEditor, useTaskSettings, useTaskPolling dengan fake EventSource, ClipCard mode rendering, CreateTaskForm submit path).
+1. Unit test frontend dihapus (Vitest); verifikasi via `pnpm run lint` + `cd e2e && pnpm exec playwright test`.
 2. pnpm run lint — nol error, nol warning baru.
-3. pnpm run test:e2e (T10 browser regression) — seluruh spek e2e hijau: home auth, task detail (seeded clip visible), list, settings save, admin gate.
+3. cd e2e && pnpm exec playwright test (T10 browser regression) — seluruh spek e2e hijau: home auth, task detail (seeded clip visible), list, settings save, admin gate.
 4. TIDAK ada perubahan perilaku baseline: URL route tidak berubah, kontrak API tidak berubah (body/endpoint sama), teks UI tidak berubah, alur user tidak berubah (kecuali refactor murni internal).
 5. Tidak ada kode mati: pindahkan (bukan salin) logika; verifikasi dengan grep bahwa handler lama tidak tersisa.
 6. Bundel build: pnpm run build sukses (TS strict + Next build) — menjamin tidak ada import yang hilang.

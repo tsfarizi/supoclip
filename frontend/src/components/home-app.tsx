@@ -199,6 +199,7 @@ async function uploadVideoFileViaProxy(file: File): Promise<string> {
 
 export default function HomeApp() {
   const [url, setUrl] = useState("");
+  const [urlTouched, setUrlTouched] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState("");
@@ -553,6 +554,10 @@ export default function HomeApp() {
       // If uploading file, upload it first
       if (sourceType === "upload" && fileRef.current) {
         setStatusMessage("Uploading video file...");
+        // The upload happens before task creation, so "validation" is the
+        // only step that is ever active here; it makes the status block
+        // render (block is gated on currentStep && statusMessage).
+        setCurrentStep("validation");
         setProgress(5);
         videoUrl = await uploadVideoFile(fileRef.current);
       }
@@ -973,17 +978,26 @@ export default function HomeApp() {
 
                 {/* URL / Upload Input */}
                 {sourceType === "youtube" ? (
-                  <div className="relative">
-                    <Youtube className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-stone-400" />
-                    <Input
-                      id="youtube-url"
-                      type="url"
-                      placeholder="https://www.youtube.com/watch?v=..."
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                      disabled={generationControlsDisabled}
-                      className="h-14 pl-12 text-base rounded-xl border-stone-300 focus:border-stone-500 placeholder:text-stone-400"
-                    />
+                  <div>
+                    <div className="relative">
+                      <Youtube className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-stone-400" />
+                      <Input
+                        id="youtube-url"
+                        type="url"
+                        placeholder="https://www.youtube.com/watch?v=..."
+                        value={url}
+                        onChange={(e) => setUrl(e.target.value)}
+                        onBlur={() => setUrlTouched(true)}
+                        disabled={generationControlsDisabled}
+                        aria-describedby={urlTouched && !url.trim() ? "youtube-url-help" : undefined}
+                        className="h-14 pl-12 text-base rounded-xl border-stone-300 focus:border-stone-500 placeholder:text-stone-400"
+                      />
+                    </div>
+                    {urlTouched && !url.trim() && (
+                      <p id="youtube-url-help" className="text-xs text-stone-500 mt-1.5">
+                        Masukkan URL YouTube atau pilih file video.
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div

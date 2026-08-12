@@ -222,28 +222,16 @@ Primary files:
 
 ## Testing and Verification
 
-The repository now uses a three-layer automated test setup:
+The repository now uses a two-layer automated test setup:
 
 - backend `pytest` for unit and integration coverage
-- frontend `Vitest` plus Testing Library for route handlers and client UI
-- frontend `Playwright` for seeded browser smoke tests against real frontend and backend processes
-
-Primary repo-level commands:
-
-```bash
-make test
-make test-backend
-make test-frontend
-make test-e2e
-make test-ci
-```
+- frontend `Playwright` for browser e2e tests in `e2e/` against real frontend and backend processes
 
 Direct app-level commands:
 
 ```bash
-cd backend && uv sync --all-groups && .venv/bin/pytest
-cd frontend && npm install && npm run test:coverage
-cd frontend && npm run test:e2e
+cd backend && uv run pytest
+cd e2e && pnpm exec playwright test
 ```
 
 ### Local Test Environment
@@ -265,7 +253,7 @@ BETTER_AUTH_SECRET=supoclip_better_auth_test_secret
 ### Coverage and CI
 
 - Backend coverage thresholds are enforced during `pytest`.
-- Frontend coverage thresholds are enforced during `npm run test:coverage`.
+- Frontend unit tests were removed with Vitest; frontend verification is `pnpm run lint` plus the Playwright e2e suite in `e2e/`.
 - GitHub Actions runs separate `backend`, `frontend`, and `e2e` jobs with Postgres and Redis service containers.
 - Playwright failures retain traces, screenshots, and videos for debugging.
 

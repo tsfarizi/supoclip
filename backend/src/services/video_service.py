@@ -35,7 +35,7 @@ from ..clip_source_map import (
 )
 from ..ai import get_most_relevant_parts_by_transcript
 from ..config import get_config
-from ..errors import CancelledError, DownloadError
+from ..errors import CancelledError, DownloadError, InvalidSourceError
 
 logger = logging.getLogger(__name__)
 UPLOAD_URL_PREFIX = "upload://"
@@ -423,7 +423,9 @@ class VideoService:
             return "youtube"
         if url.startswith(UPLOAD_URL_PREFIX):
             return "video_url"
-        raise ValueError("Only YouTube URLs or upload:// references are supported")
+        raise InvalidSourceError(
+            "Only YouTube URLs or upload:// references are supported"
+        )
 
     @staticmethod
     async def process_video_complete(
