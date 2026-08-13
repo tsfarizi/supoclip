@@ -27,6 +27,7 @@ from ..video_utils import (
     build_keep_ranges_from_source_ranges,
     build_clip_signal_summary,
     extend_keep_ranges_to_sentence_boundary,
+    load_cached_transcript_data,
     seconds_to_mmss,
 )
 from ..clip_source_map import (
@@ -530,7 +531,11 @@ class VideoService:
                 await progress_callback(30, "Generating transcript...", "processing")
 
             transcript = cached_transcript
-            if not transcript:
+            if not transcript or load_cached_transcript_data(video_path) is None:
+                if transcript:
+                    logger.info(
+                        "Cached transcript present but word-timing sidecar missing; re-transcribing"
+                    )
                 transcript = await VideoService.generate_transcript(
                     video_path, processing_mode=processing_mode
                 )
