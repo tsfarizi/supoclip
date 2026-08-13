@@ -67,6 +67,26 @@ class Config:
             self.get_optional_env("FFMPEG_BIN_DIR") or DEFAULT_FFMPEG_BIN_DIR
         )
 
+        # Persistent YouTube source-video cache. Keyed by canonical video ID so
+        # repeated tasks on the same video skip the download entirely.
+        self.video_cache_enabled = self._get_bool_env("VIDEO_CACHE_ENABLED", True)
+        self.video_cache_dir = self._get_optional_env("VIDEO_CACHE_DIR")
+        self.video_cache_ttl_hours = int(os.getenv("VIDEO_CACHE_TTL_HOURS", "24"))
+        self.video_cache_max_gb = int(os.getenv("VIDEO_CACHE_MAX_GB", "20"))
+        # When a cache hit is used, skip the YouTube metadata preflight and rely
+        # on the sidecar/ffprobe duration for the max-duration guard.
+        self.video_cache_skip_metadata = self._get_bool_env(
+            "VIDEO_CACHE_SKIP_METADATA", True
+        )
+
+        # Optional YuNet face-detection model (OpenCV DNN onnx). When unset the
+        # detector chain falls back to MediaPipe then Haar. The model file is
+        # downloaded from Hugging Face on first use when auto_download is on.
+        self.yunet_model_path = self._get_optional_env("YUNET_MODEL_PATH")
+        self.yunet_model_repo = self._get_optional_env("YUNET_MODEL_REPO")
+        self.yunet_model_file = self._get_optional_env("YUNET_MODEL_FILE")
+        self.yunet_auto_download = self._get_bool_env("YUNET_AUTO_DOWNLOAD", True)
+
         # Redis configuration
         self.redis_host = os.getenv("REDIS_HOST", "localhost")
         self.redis_port = int(os.getenv("REDIS_PORT", "6379"))

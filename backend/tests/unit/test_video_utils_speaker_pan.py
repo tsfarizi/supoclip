@@ -105,11 +105,14 @@ class TestBuildVerticalFilterPlanSpeakerPan:
 
         monkeypatch.setattr(video_utils, "ffprobe_duration", lambda p: 10.0)
         monkeypatch.setattr(
-            video_utils, "analyze_vertical_clip", lambda p: ([], [1.0, 2.0])
+            video_utils,
+            "analyze_vertical_clip_multi",
+            lambda p: ([], [], [1.0, 2.0]),
         )
         monkeypatch.setattr(
-            video_utils, "detect_speaker_reframe_plan",
-            lambda p, fmt: pan_plan,
+            video_utils,
+            "detect_speaker_reframe_plan",
+            lambda p, fmt, face_centers=None, scene_cut_count=None: pan_plan,
         )
 
         video_filter, mode = video_utils.build_vertical_filter_plan(
@@ -127,9 +130,15 @@ class TestBuildVerticalFilterPlanSpeakerPan:
 
         monkeypatch.setattr(video_utils, "ffprobe_duration", lambda p: 10.0)
         monkeypatch.setattr(
-            video_utils, "analyze_vertical_clip", lambda p: ([], [1.0, 2.0])
+            video_utils,
+            "analyze_vertical_clip_multi",
+            lambda p: ([], [], [1.0, 2.0]),
         )
-        monkeypatch.setattr(video_utils, "detect_speaker_reframe_plan", lambda p, fmt: None)
+        monkeypatch.setattr(
+            video_utils,
+            "detect_speaker_reframe_plan",
+            lambda p, fmt, face_centers=None, scene_cut_count=None: None,
+        )
         monkeypatch.setattr(
             video_utils, "detect_optimal_crop_region", lambda p, s, e: (100, 0, 608, 1080)
         )
@@ -146,13 +155,15 @@ class TestBuildVerticalFilterPlanSpeakerPan:
         clip = tmp_path / "clip.mp4"
         probe_calls = {"n": 0}
 
-        def fail_if_called(p, fmt):
+        def fail_if_called(p, fmt, face_centers=None, scene_cut_count=None):
             probe_calls["n"] += 1
             raise AssertionError("pan probe must be skipped for 3-cut clips")
 
         monkeypatch.setattr(video_utils, "ffprobe_duration", lambda p: 10.0)
         monkeypatch.setattr(
-            video_utils, "analyze_vertical_clip", lambda p: ([], [1.0, 2.0, 4.0])
+            video_utils,
+            "analyze_vertical_clip_multi",
+            lambda p: ([], [], [1.0, 2.0, 4.0]),
         )
         monkeypatch.setattr(video_utils, "detect_speaker_reframe_plan", fail_if_called)
         monkeypatch.setattr(

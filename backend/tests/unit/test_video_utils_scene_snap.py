@@ -95,7 +95,15 @@ class TestCreateOptimizedClipSceneSnapIntegration:
 
         calls = {"detect": [], "run": []}
 
-        def wrapped_extend(_video_path, ranges, max_extension_seconds=8.0):
+        def wrapped_extend(
+            _video_path,
+            ranges,
+            max_extension_seconds=8.0,
+            padding_seconds=0.35,
+            place_at_silence=True,
+            pull_back_to_complete_sentence=False,
+            min_duration_seconds=15.0,
+        ):
             return fake_extend(_video_path, ranges)
 
         def wrapped_detect(_video_path, start_seconds, end_seconds, scene_threshold=0.4):

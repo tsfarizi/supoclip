@@ -313,8 +313,11 @@ class TestTwoSpeakersVertical:
 
         original_plan = video_utils.detect_speaker_reframe_plan
 
-        def recording_plan(clip_path, output_format):
-            plan = original_plan(clip_path, output_format)
+        def recording_plan(clip_path, output_format, face_centers=None, scene_cut_count=None):
+            plan = original_plan(
+                clip_path, output_format, face_centers=face_centers,
+                scene_cut_count=scene_cut_count,
+            )
             plan_results.append({"format": output_format, "plan": plan})
             return plan
 
@@ -362,8 +365,11 @@ class TestSingleFaceVertical:
 
         original_plan = video_utils.detect_speaker_reframe_plan
 
-        def recording_plan(clip_path, output_format):
-            plan = original_plan(clip_path, output_format)
+        def recording_plan(clip_path, output_format, face_centers=None, scene_cut_count=None):
+            plan = original_plan(
+                clip_path, output_format, face_centers=face_centers,
+                scene_cut_count=scene_cut_count,
+            )
             plan_results.append({"format": output_format, "plan": plan})
             return plan
 

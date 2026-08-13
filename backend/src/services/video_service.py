@@ -226,6 +226,7 @@ class VideoService:
         transcript: str,
         clip_signals: Optional[str] = None,
         include_broll: bool = False,
+        visual_signals: Optional[str] = None,
     ) -> Any:
         """
         Analyze transcript with AI to find relevant segments.
@@ -236,6 +237,7 @@ class VideoService:
             transcript,
             clip_signals=clip_signals,
             include_broll=include_broll,
+            visual_signals=visual_signals,
         )
         logger.info(
             f"AI analysis complete: {len(relevant_parts.most_relevant_segments)} segments found"
@@ -339,7 +341,9 @@ class VideoService:
                     end_seconds,
                     cleanup_settings,
                 )
-            keep_ranges = extend_keep_ranges_to_sentence_boundary(video_path, keep_ranges)
+            keep_ranges = extend_keep_ranges_to_sentence_boundary(
+                video_path, keep_ranges, pull_back_to_complete_sentence=True
+            )
 
             success = await run_in_thread(
                 create_optimized_clip,
@@ -462,19 +466,48 @@ class VideoService:
                 await progress_callback(10, "Downloading video...", "processing")
 
             if source_type == "youtube":
-                video_info = await async_get_youtube_video_info(url, task_id=task_id)
-                if video_info:
-                    duration = video_info.get("duration", 0)
-                    if duration and duration > runtime_config.max_video_duration:
+                # Persistent video cache: a validated hit skips the metadata
+                # preflight and the download entirely. The post-download
+                # duration guard below still validates the cached file.
+                from ..video_cache import lookup as cache_lookup
+
+                video_id = get_youtube_video_id(url)
+                cached = cache_lookup(video_id) if video_id else None
+                if (
+                    cached is not None
+                    and runtime_config.video_cache_skip_metadata
+                ):
+                    if (
+                        cached.duration_seconds
+                        and cached.duration_seconds > runtime_config.max_video_duration
+                    ):
                         mins = runtime_config.max_video_duration // 60
                         raise DownloadError(
-                            f"Video is too long ({duration // 60} min). "
+                            f"Video is too long ({int(cached.duration_seconds) // 60} min). "
                             f"Maximum allowed duration is {mins} minutes."
                         )
+                    video_path = Path(cached.path)
+                    if not video_path.exists():
+                        raise DownloadError("Cached video file not found")
+                    logger.info(
+                        "Using video cache for %s: %s",
+                        video_id,
+                        video_path.name,
+                    )
+                else:
+                    video_info = await async_get_youtube_video_info(url, task_id=task_id)
+                    if video_info:
+                        duration = video_info.get("duration", 0)
+                        if duration and duration > runtime_config.max_video_duration:
+                            mins = runtime_config.max_video_duration // 60
+                            raise DownloadError(
+                                f"Video is too long ({duration // 60} min). "
+                                f"Maximum allowed duration is {mins} minutes."
+                            )
 
-                video_path = await VideoService.download_video(url, task_id=task_id)
-                if not video_path:
-                    raise DownloadError("Failed to download video")
+                    video_path = await VideoService.download_video(url, task_id=task_id)
+                    if not video_path:
+                        raise DownloadError("Failed to download video")
             else:
                 video_path = VideoService.resolve_local_video_path(url)
                 if not video_path.exists():
@@ -556,10 +589,25 @@ class VideoService:
                 except Exception as exc:
                     logger.warning("Clip signal extraction failed: %s", exc)
                     clip_signals = None
+
+                visual_signals = None
+                try:
+                    from ..visual_signals import build_visual_signal_summary
+
+                    visual_signals = await run_in_thread(
+                        build_visual_signal_summary,
+                        video_path,
+                        transcript,
+                    )
+                except Exception as exc:
+                    logger.warning("Visual signal extraction failed: %s", exc)
+                    visual_signals = None
+
                 relevant_parts = await VideoService.analyze_transcript(
                     transcript,
                     clip_signals=clip_signals,
                     include_broll=include_broll,
+                    visual_signals=visual_signals,
                 )
 
             # Step 4: Create clips

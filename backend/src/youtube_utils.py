@@ -743,6 +743,18 @@ async def async_download_youtube_video(
         logger.info("Acquired video download lock for %s", video_id)
 
     try:
+        from .video_cache import lookup as cache_lookup, store as cache_store
+
+        cached = cache_lookup(video_id)
+        if cached is not None:
+            logger.info(
+                "Video cache hit for %s: %s (%.1fMB)",
+                video_id,
+                cached.path.name,
+                cached.path.stat().st_size / 1024 / 1024,
+            )
+            return cached.path
+
         existing = _find_existing_download(video_id)
         if existing is not None:
             logger.info(
@@ -751,10 +763,25 @@ async def async_download_youtube_video(
                 existing.name,
                 existing.stat().st_size / 1024 / 1024,
             )
+            try:
+                stored = cache_store(existing, video_id)
+                if stored != existing:
+                    logger.info("Promoted temp download for %s into video cache", video_id)
+            except Exception as exc:
+                logger.warning("Failed to promote %s into video cache: %s", video_id, exc)
             return existing
-        return await asyncio.to_thread(
+
+        path = await asyncio.to_thread(
             download_youtube_video, url, max_retries, task_id
         )
+        if path is not None:
+            try:
+                stored = cache_store(path, video_id)
+                if stored != path:
+                    logger.info("Stored fresh download for %s into video cache", video_id)
+            except Exception as exc:
+                logger.warning("Failed to cache download for %s: %s", video_id, exc)
+        return path
     finally:
         # Only reached with a lock we hold: the timeout path returned above.
         await release_video_download_lock(video_id)
@@ -802,6 +829,13 @@ def cleanup_downloaded_files(video_id: str):
                 logger.info(f"Cleaned up: {file_path.name}")
         except Exception as e:
             logger.warning(f"Failed to cleanup {file_path.name}: {e}")
+
+    try:
+        from .video_cache import invalidate as cache_invalidate
+
+        cache_invalidate(video_id)
+    except Exception as e:
+        logger.warning(f"Failed to invalidate video cache for {video_id}: {e}")
 
 
 # Backward compatibility functions

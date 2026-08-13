@@ -61,7 +61,7 @@ interface FontOption {
   format?: string;
 }
 
-type OutputFormat = "vertical" | "vertical_pan" | "vertical_split" | "original";
+type OutputFormat = "vertical" | "vertical_pan" | "vertical_split" | "original" | "auto";
 
 const MAX_VIDEO_UPLOAD_BYTES = 1_000_000_000;
 
@@ -1096,6 +1096,7 @@ export default function HomeApp() {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="vertical">Auto 9:16</SelectItem>
+                        <SelectItem value="auto">Auto 9:16 / 16:9</SelectItem>
                         <SelectItem value="vertical_pan">Speaker pan</SelectItem>
                         <SelectItem value="vertical_split">Split-screen</SelectItem>
                         <SelectItem value="original">Original</SelectItem>

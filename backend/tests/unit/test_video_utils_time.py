@@ -90,10 +90,17 @@ class TestValidOutputFormats:
             "vertical_pan",
             "vertical_split",
             "original",
+            "auto",
         }
 
     def test_membership(self):
-        for fmt in ("vertical", "vertical_pan", "vertical_split", "original"):
+        for fmt in (
+            "vertical",
+            "vertical_pan",
+            "vertical_split",
+            "original",
+            "auto",
+        ):
             assert fmt in VALID_OUTPUT_FORMATS
         assert "invalid" not in VALID_OUTPUT_FORMATS
         assert "" not in VALID_OUTPUT_FORMATS

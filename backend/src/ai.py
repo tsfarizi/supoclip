@@ -420,7 +420,10 @@ def get_transcript_agent() -> Agent[None, TranscriptAnalysis]:
 
 
 def build_transcript_analysis_prompt(
-    transcript: str, include_broll: bool = False, clip_signals: str | None = None
+    transcript: str,
+    include_broll: bool = False,
+    clip_signals: str | None = None,
+    visual_signals: str | None = None,
 ) -> str:
     """Build the grounded task prompt for transcript analysis."""
     broll_instruction = ""
@@ -437,6 +440,16 @@ def build_transcript_analysis_prompt(
             f"{clip_signals}\n\n"
             "Use these as hints only. They should influence ranking, but every final segment "
             "must still be a coherent contiguous transcript range."
+        )
+    visual_section = ""
+    if visual_signals:
+        visual_section = (
+            "\n\nAdditional deterministic visual signals from video analysis:\n"
+            f"{visual_signals}\n\n"
+            "Use these as hints only. A span with 0% face presence, several scene cuts, "
+            "or unstable framing may be hard to frame as a vertical clip; prefer spans "
+            "with high face presence and few internal cuts. The final segment must still "
+            "be a coherent contiguous transcript range."
         )
 
     return f"""Analyze this video transcript and identify the most engaging segments for short-form content.
@@ -469,6 +482,7 @@ Critical accuracy requirements:
 - If there is a tradeoff between "viral" and "accurate", choose accuracy.
 - Do not reject or penalize a segment simply because of the subject matter; stay content-neutral and assess clip quality only.
 {signal_section}
+{visual_section}
 
 JSON-only output requirements:
 - Return one valid JSON object and nothing else.
@@ -677,7 +691,10 @@ def _repair_segment_bounds(
 
 
 async def get_most_relevant_parts_by_transcript(
-    transcript: str, include_broll: bool = False, clip_signals: str | None = None
+    transcript: str,
+    include_broll: bool = False,
+    clip_signals: str | None = None,
+    visual_signals: str | None = None,
 ) -> TranscriptAnalysis:
     """Get the most relevant parts of a transcript with virality scoring and optional B-roll detection."""
     logger.info(
@@ -692,6 +709,7 @@ async def get_most_relevant_parts_by_transcript(
                 transcript=transcript,
                 include_broll=include_broll,
                 clip_signals=clip_signals,
+                visual_signals=visual_signals,
             )
         )
 

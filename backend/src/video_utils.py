@@ -36,7 +36,12 @@ from .font_registry import FONTS_DIR, find_font_path, get_font_family_name
 
 logger = logging.getLogger(__name__)
 TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
-VALID_OUTPUT_FORMATS = {"vertical", "vertical_pan", "vertical_split", "original"}
+VALID_OUTPUT_FORMATS = {"vertical", "vertical_pan", "vertical_split", "original", "auto"}
+# "auto" renders a clip 16:9 (full landscape frame) when the clip is dominated
+# by non-face content shots (slides/tweets/screen recordings/horizontal video),
+# otherwise it renders the standard 9:16 vertical layout.
+AUTO_FIT_MAJORITY_RATIO = 0.5
+AUTO_LANDSCAPE_OUTPUT = "landscape"
 # Family name of the bundled colour-emoji font (fonts/NotoColorEmoji.ttf). We
 # force it explicitly per-emoji via an ASS \fn override so libass renders colour
 # emojis reliably instead of depending on automatic Unicode font fallback.
@@ -1451,11 +1456,19 @@ def extend_keep_ranges_to_sentence_boundary(
     max_extension_seconds: float = CLIP_END_SENTENCE_EXTENSION_SECONDS,
     padding_seconds: float = CLIP_END_PADDING_SECONDS,
     place_at_silence: bool = True,
+    pull_back_to_complete_sentence: bool = False,
+    min_duration_seconds: float = 15.0,
 ) -> List[Tuple[float, float]]:
     """Extend the final source range when a clip end lands mid-sentence.
 
     Default parameters reproduce the historical behaviour; place_at_silence
     moves the cut inside a breath gap after a sentence-ending word.
+
+    pull_back_to_complete_sentence: when no sentence boundary is reachable
+    within the extension cap, pull the clip end BACKWARD to the last complete
+    sentence before the original end instead of leaving a mid-sentence cut.
+    The pull-back is only applied when it keeps the final range at least
+    min_duration_seconds long; otherwise the historical end is preserved.
     """
     normalized = normalize_source_ranges(keep_ranges)
     if not normalized:
@@ -1510,6 +1523,27 @@ def extend_keep_ranges_to_sentence_boundary(
         silence_threshold=0.25 if place_at_silence else float("inf"),
     )
 
+    if pull_back_to_complete_sentence and not _is_sentence_end_point(
+        nearby_words, extended_end
+    ):
+        # The extension did not land on a complete sentence (it hit the cap or
+        # a non-sentence word end). Pull the end back to the last complete
+        # sentence before the original end when that keeps the clip long enough.
+        total_duration = sum(end - start for start, end in normalized)
+        pulled_end = _pick_pull_back_end(
+            nearby_words,
+            last_end,
+            min_duration_seconds,
+            total_duration,
+        )
+        if pulled_end is not None:
+            logger.info(
+                "Pulled clip end back to complete sentence: %.2fs -> %.2fs",
+                last_end,
+                pulled_end,
+            )
+            return [*normalized[:-1], (last_start, pulled_end)]
+
     if extended_end <= last_end:
         return normalized
     extended_end = min(extended_end, cap_end)
@@ -1517,6 +1551,52 @@ def extend_keep_ranges_to_sentence_boundary(
         return normalized
 
     return [*normalized[:-1], (last_start, extended_end)]
+
+
+def _is_sentence_end_point(
+    words: List[Dict[str, Any]], end_seconds: float
+) -> bool:
+    """Whether some word in ``words`` ends a sentence at exactly end_seconds."""
+    if not words or end_seconds is None:
+        return False
+    return any(
+        abs(float(word["end"]) - end_seconds) <= 0.05
+        and word_ends_sentence(str(word.get("text", "")))
+        for word in words
+    )
+
+
+def _pick_pull_back_end(
+    words: List[Dict[str, Any]],
+    range_end: float,
+    min_duration_seconds: float,
+    current_total_duration: float,
+) -> Optional[float]:
+    """Return the end of the last complete sentence before range_end, or None.
+
+    Only sentence-ending words that started before range_end are considered.
+    The chosen end must leave the CLIP's total duration (which may span several
+    keep ranges) at least min_duration_seconds long; shorter clips keep their
+    historical end rather than being cut further.
+    """
+    if not words:
+        return None
+
+    candidates = sorted(
+        float(word["end"])
+        for word in words
+        if float(word["start"]) <= range_end + 0.05
+        and word_ends_sentence(str(word.get("text", "")))
+        and float(word["end"]) <= range_end + 0.05
+    )
+    if not candidates:
+        return None
+
+    for end in reversed(candidates):
+        new_total = current_total_duration - (range_end - end)
+        if new_total >= min_duration_seconds:
+            return end
+    return None
 
 
 def snap_keep_ranges_end_to_scene_cut(
@@ -2200,23 +2280,49 @@ def build_pan_expression(
     return build_smooth_pan_expression(cleaned)
 
 
+def tracks_to_face_centers(tracks: List[Any]) -> List[Tuple[int, int, int, float]]:
+    """Convert FaceTrack samples into (center_x, center_y, area, confidence).
+
+    Feeds the existing two-face clustering (cluster_two_face_regions) from the
+    multi-track analysis so detect_speaker_reframe_plan can reuse one decode
+    pass instead of running its own detection.
+    """
+    centers: List[Tuple[int, int, int, float]] = []
+    for track in tracks:
+        for sample in track.samples:
+            cx, cy = sample.center()
+            centers.append((int(cx), int(cy), sample.area(), float(sample.confidence)))
+    return centers
+
+
 def detect_speaker_reframe_plan(
     clip_path: Path,
     output_format: str,
+    face_centers: Optional[List[Tuple[int, int, int, float]]] = None,
+    scene_cut_count: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Build a speaker-aware pan or split-screen plan for a trimmed clip."""
+    """Build a speaker-aware pan or split-screen plan for a trimmed clip.
+
+    When ``face_centers`` is provided (from analyze_vertical_clip_multi) the
+    detection pass is skipped and the caller's analysis is reused; otherwise a
+    fresh detection runs on the first 12 seconds of the clip. ``scene_cut_count``
+    short-circuits the scene-count probe when the caller already knows it.
+    """
     try:
         width, height = ffprobe_video_size(clip_path)
         if width / max(height, 1) <= 1.2:
             return None
 
-        scene_cuts = count_scene_cuts(clip_path)
-        if scene_cuts > 2:
-            logger.info("Skipping speaker reframe: %d scene cuts detected", scene_cuts)
+        if scene_cut_count is None:
+            scene_cuts = count_scene_cuts(clip_path)
+            scene_cut_count = scene_cuts
+        if scene_cut_count > 2:
+            logger.info("Skipping speaker reframe: %d scene cuts detected", scene_cut_count)
             return None
 
         duration = ffprobe_duration(clip_path)
-        face_centers = detect_faces_in_clip(clip_path, 0, min(duration, 12.0))
+        if face_centers is None:
+            face_centers = detect_faces_in_clip(clip_path, 0, min(duration, 12.0))
         regions = cluster_two_face_regions(face_centers, width, height)
         if not regions:
             return None
@@ -2381,65 +2487,207 @@ def compute_vertical_crop_dims(
 
 
 def _open_face_detectors():
-    """Initialise the MediaPipe (preferred) + Haar (fallback) face detectors."""
-    mp_face = None
+    """Initialise the detector chain (YuNet preferred, MediaPipe, Haar fallback).
+
+    Returns a list of _FaceDetector instances tried in priority order. Every
+    entry exposes detect(frame_bgr) -> List[FaceDetection] and close() so the
+    caller can release per-call resources deterministically.
+    """
+    chain: List[_FaceDetector] = []
+    yunet = _open_yunet_detector()
+    if yunet is not None:
+        chain.append(yunet)
+    mp = _open_mediapipe_detector()
+    if mp is not None:
+        chain.append(mp)
+    chain.append(_open_haar_detector())
+    return chain
+
+
+def _open_yunet_detector() -> Optional["_FaceDetector"]:
+    """OpenCV YuNet (DNN) detector; model resolved/downloaded via model_assets."""
+    try:
+        from .model_assets import resolve_yunet_model
+
+        model_path = resolve_yunet_model()
+    except Exception as exc:
+        logger.info("YuNet model resolution failed (%s); using fallbacks", exc)
+        return None
+    if not model_path or not Path(model_path).exists():
+        return None
+    try:
+        from cv2 import FaceDetectorYN
+
+        detector = FaceDetectorYN.create(str(model_path), "", (320, 320), 0.5, 0.3, 5000)
+
+        def detect(frame_bgr) -> List[FaceDetection]:
+            height, width = frame_bgr.shape[:2]
+            detector.setInputSize((width, height))
+            _ok, faces = detector.detect(frame_bgr)
+            if faces is None:
+                return []
+            result: List[FaceDetection] = []
+            for face in faces:
+                x, y, fw, fh = face[:4]
+                confidence = float(face[-1])
+                result.append(FaceDetection(int(x), int(y), int(fw), int(fh), confidence))
+            return result
+
+        return _FaceDetector("yunet", detect)
+    except Exception as exc:
+        logger.info("YuNet detector unavailable (%s); using fallbacks", exc)
+        return None
+
+
+def _open_mediapipe_detector() -> Optional["_FaceDetector"]:
+    """MediaPipe face detector (full-range, matches the old analyze path)."""
     try:
         import mediapipe as mp
 
         mp_face = mp.solutions.face_detection.FaceDetection(
             model_selection=1, min_detection_confidence=0.5
         )
+
+        def detect(frame_bgr) -> List[FaceDetection]:
+            results = mp_face.process(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+            if not results.detections:
+                return []
+            height, width = frame_bgr.shape[:2]
+            result: List[FaceDetection] = []
+            for det in results.detections:
+                box = det.location_data.relative_bounding_box
+                confidence = float(det.score[0]) if det.score else 0.5
+                x = int(box.xmin * width)
+                y = int(box.ymin * height)
+                fw = int(box.width * width)
+                fh = int(box.height * height)
+                result.append(FaceDetection(x, y, fw, fh, confidence))
+            return result
+
+        def close() -> None:
+            try:
+                mp_face.close()
+            except Exception:
+                pass
+
+        return _FaceDetector("mediapipe", detect, close)
     except Exception as exc:
         logger.info("MediaPipe unavailable (%s); using Haar", exc)
+        return None
+
+
+def _open_haar_detector() -> "_FaceDetector":
+    """OpenCV Haar cascade detector, always available."""
     haar = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
-    return mp_face, haar
+
+    def detect(frame_bgr) -> List[FaceDetection]:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        height, width = frame_bgr.shape[:2]
+        min_side = max(14, int(width * 0.04))
+        faces = haar.detectMultiScale(
+            gray,
+            scaleFactor=1.2,
+            minNeighbors=3,
+            minSize=(min_side, min_side),
+            maxSize=(int(width * 0.7), int(height * 0.7)),
+        )
+        result: List[FaceDetection] = []
+        frame_area = max(1, width * height)
+        for (fx, fy, fw, fh) in faces:
+            confidence = min(0.9, 0.3 + (fw * fh) / frame_area * 2)
+            result.append(FaceDetection(int(fx), int(fy), int(fw), int(fh), confidence))
+        return result
+
+    return _FaceDetector("haar", detect)
 
 
-def _detect_dominant_face(frame_bgr, mp_face, haar) -> Optional[Tuple[float, float]]:
+class _FaceDetector:
+    """Named face detector with a stable detect()/close() contract."""
+
+    __slots__ = ("name", "_detect_fn", "_close_fn")
+
+    def __init__(self, name: str, detect_fn, close_fn=None):
+        self.name = name
+        self._detect_fn = detect_fn
+        self._close_fn = close_fn
+
+    def detect(self, frame_bgr) -> List["FaceDetection"]:
+        try:
+            return self._detect_fn(frame_bgr) or []
+        except Exception as exc:
+            logger.debug("Face detector %s failed: %s", self.name, exc)
+            return []
+
+    def close(self) -> None:
+        if self._close_fn is not None:
+            try:
+                self._close_fn()
+            except Exception:
+                pass
+
+
+class FaceDetection:
+    """A single face detection: absolute pixel bbox plus confidence."""
+
+    __slots__ = ("x", "y", "w", "h", "confidence")
+
+    def __init__(self, x: int, y: int, w: int, h: int, confidence: float):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.confidence = confidence
+
+    def center_x(self) -> float:
+        return self.x + self.w / 2.0
+
+    def center_y(self) -> float:
+        return self.y + self.h / 2.0
+
+    def area(self) -> int:
+        return self.w * self.h
+
+
+def detect_faces(
+    frame_bgr, chain: List[_FaceDetector], min_side: int = 10, max_area_frac: float = 0.5
+) -> List[FaceDetection]:
+    """Run the detector chain and return all faces above the minimum size.
+
+    The first detector that returns any face wins; subsequent detectors are
+    not consulted. Filters out degenerate detections (too small or covering
+    almost the whole frame).
+    """
+    height, width = frame_bgr.shape[:2]
+    frame_area = max(1, width * height)
+    for detector in chain:
+        faces = detector.detect(frame_bgr)
+        if not faces:
+            continue
+        filtered = [
+            face
+            for face in faces
+            if face.w >= min_side
+            and face.h >= min_side
+            and face.area() / frame_area <= max_area_frac
+        ]
+        if filtered:
+            return filtered
+    return []
+
+
+def _detect_dominant_face(
+    frame_bgr, chain: List[_FaceDetector]
+) -> Optional[Tuple[float, float]]:
     """Return (center_x_fraction, area_fraction) of the dominant face, or None."""
-    h, w = frame_bgr.shape[:2]
-    frame_area = float(max(1, w * h))
-    best: Optional[Tuple[float, float, float]] = None  # (score, cx, area_frac)
-
-    if mp_face is not None:
-        try:
-            results = mp_face.process(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-            if results.detections:
-                for det in results.detections:
-                    box = det.location_data.relative_bounding_box
-                    bw = max(0.0, box.width) * w
-                    bh = max(0.0, box.height) * h
-                    conf = float(det.score[0]) if det.score else 0.5
-                    cx = (box.xmin + box.width / 2) * w
-                    score = bw * bh * conf
-                    if bw > 10 and bh > 10 and (best is None or score > best[0]):
-                        best = (score, cx, (bw * bh) / frame_area)
-        except Exception:
-            pass
-
-    if best is None:
-        try:
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            min_side = max(14, int(w * 0.04))
-            faces = haar.detectMultiScale(
-                gray,
-                scaleFactor=1.2,  # coarser scale steps -> ~2x faster
-                minNeighbors=3,
-                minSize=(min_side, min_side),
-                maxSize=(int(w * 0.7), int(h * 0.7)),
-            )
-            for (fx, fy, fw, fh) in faces:
-                score = float(fw * fh)
-                if best is None or score > best[0]:
-                    best = (score, fx + fw / 2.0, (fw * fh) / frame_area)
-        except Exception:
-            pass
-
-    if best is None:
+    faces = detect_faces(frame_bgr, chain)
+    if not faces:
         return None
-    return best[1] / w, best[2]
+    best = max(faces, key=lambda face: face.area() * face.confidence)
+    height, width = frame_bgr.shape[:2]
+    frame_area = max(1, width * height)
+    return best.center_x() / width, best.area() / frame_area
 
 
 def _scene_cuts_from_diffs(diffs: List[Tuple[float, float]]) -> List[float]:
@@ -2468,13 +2716,31 @@ def analyze_vertical_clip(
     proc_width: int = 640,
     max_frames: int = 1500,
 ) -> Tuple[List[Tuple[float, Optional[float], float]], List[float]]:
-    """Fast single-pass clip analysis: face track + scene cuts in one decode.
+    """Backward-compatible wrapper: dominant face track + scene cuts in one decode."""
+    dominant, _tracks, scene_cuts = analyze_vertical_clip_multi(
+        input_path, sample_fps=sample_fps, proc_width=proc_width, max_frames=max_frames
+    )
+    return dominant, scene_cuts
+
+
+def analyze_vertical_clip_multi(
+    input_path: Path,
+    *,
+    sample_fps: float = 6.0,
+    proc_width: int = 640,
+    max_frames: int = 1500,
+) -> Tuple[List[Tuple[float, Optional[float], float]], List[Any], List[float]]:
+    """Fast single-pass clip analysis: all face tracks + scene cuts in one decode.
 
     Replaces slow per-sample random seeks (and a separate scene-detect pass) with
     a single sequential ffmpeg decode at low fps/resolution, piped straight into
-    lightweight face detection. Scene cuts come from frame differences computed
-    in the same pass. Returns (track, scene_cuts) where track entries are
-    (t, center_x_in_source_px or None, area_frac).
+    lightweight multi-face detection. Returns (dominant_track, tracks, scene_cuts)
+    where:
+    - dominant_track entries are (t, center_x_in_source_px or None, area_frac) —
+      the same contract analyze_vertical_clip used to return (largest face).
+    - tracks are FaceTrack objects from face_tracking.build_face_tracks, giving
+      per-person bbox samples so framing can follow the active speaker.
+    - scene_cuts are derived from frame differences in the same pass.
 
     Frame-budget guard: the total number of decoded frames is capped at
     max_frames. The estimate (duration x sample_fps) is computed before the
@@ -2483,7 +2749,7 @@ def analyze_vertical_clip(
     """
     width, height = ffprobe_video_size(input_path)
     if width <= 0 or height <= 0:
-        return [], []
+        return [], [], []
     proc_w = round_to_even(min(proc_width, width))
     proc_h = round_to_even(max(2, int(round(proc_w * height / width))))
     frame_bytes = proc_w * proc_h * 3
@@ -2513,10 +2779,11 @@ def analyze_vertical_clip(
         )
     except Exception as exc:
         logger.warning("analyze_vertical_clip: ffmpeg spawn failed (%s)", exc)
-        return [], []
+        return [], [], []
 
-    mp_face, haar = _open_face_detectors()
-    track: List[Tuple[float, Optional[float], float]] = []
+    chain = _open_face_detectors()
+    dominant_track: List[Tuple[float, Optional[float], float]] = []
+    samples: List[Tuple[float, List[Tuple[int, int, int, int, float]]]] = []
     diffs: List[Tuple[float, float]] = []
     prev_small = None
     idx = 0
@@ -2527,12 +2794,35 @@ def analyze_vertical_clip(
                 break
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(proc_h, proc_w, 3)
             t = idx / sample_fps
-            face = _detect_dominant_face(frame, mp_face, haar)
-            if face is None:
-                track.append((t, None, 0.0))
+            faces = detect_faces(frame, chain)
+            dominant = None
+            if faces:
+                dominant = max(faces, key=lambda face: face.area() * face.confidence)
+            if dominant is None:
+                dominant_track.append((t, None, 0.0))
+                samples.append((t, []))
             else:
-                cx_frac, area = face
-                track.append((t, cx_frac * width, area))
+                dominant_track.append(
+                    (t, dominant.center_x() * width / proc_w, dominant.area() / (proc_w * proc_h))
+                )
+                # Face boxes are scaled to source resolution so downstream
+                # consumers (tracks_to_face_centers -> cluster_two_face_regions)
+                # operate in the same coordinate space as ffprobe_video_size.
+                samples.append(
+                    (
+                        t,
+                        [
+                            (
+                                int(f.x * width / proc_w),
+                                int(f.y * height / proc_h),
+                                int(f.w * width / proc_w),
+                                int(f.h * height / proc_h),
+                                f.confidence,
+                            )
+                            for f in faces
+                        ],
+                    )
+                )
             small = cv2.resize(frame, (32, 18)).astype(np.int16)
             if prev_small is not None:
                 diffs.append((t, float(np.mean(np.abs(small - prev_small)))))
@@ -2544,13 +2834,14 @@ def analyze_vertical_clip(
         except Exception:
             pass
         proc.wait()
-        if mp_face is not None:
-            try:
-                mp_face.close()
-            except Exception:
-                pass
+        for detector in chain:
+            detector.close()
 
-    return track, _scene_cuts_from_diffs(diffs)
+    from .face_tracking import build_face_tracks
+
+    tracks = build_face_tracks(samples)
+
+    return dominant_track, tracks, _scene_cuts_from_diffs(diffs)
 
 
 def _median_filter(values: List[float], window: int = 3) -> List[float]:
@@ -2572,17 +2863,19 @@ def compute_headroom_crop_x(
     width: int,
     crop_w: int,
     margin_frac: float = 0.18,
+    half_widths: Optional[List[Optional[float]]] = None,
 ) -> List[Tuple[float, float]]:
     """Per-sample crop-x that keeps the estimated face bbox inside the crop.
 
     For every detected face returns (t, crop_x) where crop_x is clamped to
     [0, width - crop_w] and, when the face bbox (half-width estimated from
-    area_frac) plus a margin of margin_frac * crop_w can fit inside the crop,
-    that bbox+margin box stays inside. When bbox+margin cannot both fit (face
-    too wide for the crop), the bbox alone is kept inside; when even that is
-    impossible, the crop is simply centred on the face (best effort). Samples
-    with a missing detection are skipped. Returns [] when the crop has no
-    horizontal room or the track is empty.
+    area_frac, or the actual face half-width from ``half_widths`` when the
+    multi-face track is available) plus a margin of margin_frac * crop_w can
+    fit inside the crop, that bbox+margin box stays inside. When bbox+margin
+    cannot both fit (face too wide for the crop), the bbox alone is kept
+    inside; when even that is impossible, the crop is simply centred on the
+    face (best effort). Samples with a missing detection are skipped. Returns
+    [] when the crop has no horizontal room or the track is empty.
 
     The bbox half-width estimate assumes a square face box and a 16:9 source:
     area_frac = face_w^2 / (W * 0.5625 * W), so
@@ -2603,10 +2896,17 @@ def compute_headroom_crop_x(
         return min(max(naive, 0.0), float(max_x))
 
     result: List[Tuple[float, float]] = []
-    for t, center_x, area_frac in track:
+    for idx, (t, center_x, area_frac) in enumerate(track):
         if center_x is None:
             continue
-        half_w = 0.375 * width * math.sqrt(max(0.0, area_frac))
+        if half_widths is not None and idx < len(half_widths):
+            known_half_w = half_widths[idx]
+            if known_half_w is not None and known_half_w > 0:
+                half_w = float(known_half_w)
+            else:
+                half_w = 0.375 * width * math.sqrt(max(0.0, area_frac))
+        else:
+            half_w = 0.375 * width * math.sqrt(max(0.0, area_frac))
         naive = min(max(center_x - crop_w / 2.0, 0.0), float(max_x))
 
         # Constraint ranges: crop_x such that the box [center +/- half_w + margin]
@@ -2626,6 +2926,47 @@ def compute_headroom_crop_x(
     return result
 
 
+def dominant_face_half_widths(
+    dominant_track: List[Tuple[float, Optional[float], float]],
+    tracks: List[Any],
+    shoulder_factor: float = 1.6,
+) -> List[Optional[float]]:
+    """Per-sample face half-widths (source px, head+shoulder-scaled).
+
+    Aligned one-to-one with ``dominant_track``: for every sample where a face
+    was detected, the widest active face at that timestamp is looked up across
+    the multi-face tracks and its half-width is scaled by ``shoulder_factor``
+    so the headroom guard keeps the shoulders inside the crop. Samples with no
+    detection map to None (the area-based estimate is used instead).
+    """
+    if not tracks:
+        return [None] * len(dominant_track)
+
+    # Index each track's samples by rounded timestamp for fast lookup.
+    by_time: Dict[float, List[Tuple[int, int, int, int, float]]] = {}
+    for track in tracks:
+        for sample in track.samples:
+            key = round(sample.t, 3)
+            by_time.setdefault(key, []).append(
+                (sample.x, sample.y, sample.w, sample.h, sample.confidence)
+            )
+
+    half_widths: List[Optional[float]] = []
+    for t, center_x, _area in dominant_track:
+        if center_x is None:
+            half_widths.append(None)
+            continue
+        candidates = by_time.get(round(t, 3))
+        if not candidates:
+            half_widths.append(None)
+            continue
+        _x, _y, w, _h, _conf = max(
+            candidates, key=lambda face: face[2] * face[3] * face[4]
+        )
+        half_widths.append(float(w) * shoulder_factor / 2.0)
+    return half_widths
+
+
 def build_crop_trajectory(
     track: List[Tuple[float, Optional[float], float]],
     width: int,
@@ -2635,6 +2976,7 @@ def build_crop_trajectory(
     smooth_time: float = 0.9,
     max_pan_speed_frac: float = 0.4,
     margin_frac: float = 0.18,
+    half_widths: Optional[List[Optional[float]]] = None,
 ) -> List[Tuple[float, int]]:
     """Turn a raw face-centre track into a smooth, eased crop-x trajectory.
 
@@ -2647,9 +2989,12 @@ def build_crop_trajectory(
 
     Headroom: the comfort targets come from compute_headroom_crop_x, so each
     crop position keeps the estimated face bbox (plus margin_frac * crop_w of
-    margin) inside the crop instead of only centring the face centre. The easing
-    slack (deadzone + max_speed) is far smaller than the margin, so the eased
-    output stays within the headroom box.
+    margin) inside the crop instead of only centring the face centre. When
+    ``half_widths`` (per-sample actual face half-widths from the multi-face
+    track) is provided it overrides the area-based estimate, so the bbox guard
+    reflects the real subject size. The easing slack (deadzone + max_speed) is
+    far smaller than the margin, so the eased output stays within the headroom
+    box.
     """
     if not track:
         return []
@@ -2685,7 +3030,7 @@ def build_crop_trajectory(
     # entry per sample in the same order.
     rebuilt = [(times[i], centers[i], areas[i]) for i in range(len(centers))]
     headroom = compute_headroom_crop_x(
-        rebuilt, width, crop_w, margin_frac=margin_frac
+        rebuilt, width, crop_w, margin_frac=margin_frac, half_widths=half_widths
     )
     desired = [x for _, x in headroom]
     desired = _median_filter(desired, window=3)
@@ -2894,13 +3239,20 @@ def build_vertical_compositor_filter(
     face_intervals: List[Tuple[float, float]],
     fit_intervals: List[Tuple[float, float]],
     blur_sigma: int = 14,
+    fit_fill: bool = True,
+    fit_crop_x_frac: float = 0.5,
 ) -> str:
-    """filter_complex switching between a tracked face crop and a blurred-
-    background full-frame fit over time. Produces a labelled [vout] stream.
+    """filter_complex switching between a tracked face crop and a full-frame
+    content fit over time. Produces a labelled [vout] stream.
 
     Layers: a blurred fill background (always), the face crop on top during face
     shots (covers the frame), and the centred full-frame fit during content
     shots (background shows around it).
+
+    fit_fill: when True the content shot is scaled to FILL the 1080x1920 frame
+    (force_original_aspect_ratio=increase + crop at fit_crop_x_frac) so
+    horizontal content (slides/video) appears large instead of a small
+    letterboxed strip; when False the historical letterboxed fit is used.
     """
     def enable_expr(intervals: List[Tuple[float, float]]) -> str:
         if not intervals:
@@ -2914,16 +3266,101 @@ def build_vertical_compositor_filter(
     # Smooth Gaussian background: blur at half resolution (plenty of detail for a
     # heavy blur) with multiple passes for a true Gaussian falloff, then upscale
     # 2x with bilinear so there's no lanczos ringing/blockiness — a creamy blur.
+    if fit_fill:
+        frac = min(0.8, max(0.2, float(fit_crop_x_frac)))
+        fit_chain = (
+            "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop=1080:1920:x='trunc((iw-1080)*{frac:.3f}/2)*2':y=0,setsar=1"
+        )
+    else:
+        fit_chain = (
+            "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
+        )
     return (
         "[0:v]split=3[bgsrc][crsrc][ftsrc];"
         "[bgsrc]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,"
         f"gblur=sigma={blur_sigma}:steps=2,scale=1080:1920:flags=bilinear,setsar=1[bg];"
         f"[crsrc]{crop_chain}[face];"
-        "[ftsrc]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[fit];"
+        f"[ftsrc]{fit_chain}[fit];"
         f"[bg][face]overlay=0:0:enable='{face_en}'[t1];"
         f"[t1][fit]overlay=(W-w)/2:(H-h)/2:enable='{fit_en}'[vout]"
     )
+
+
+def _fit_crop_x_fraction(
+    track: List[Tuple[float, Optional[float], float]],
+    fit_intervals: List[Tuple[float, float]],
+    width: int,
+) -> float:
+    """Median horizontal face fraction inside content shots; 0.5 when unknown.
+
+    Content shots are, by construction, mostly face-free, so the median only
+    has an effect when a speaker remains partly visible during a slide/screen
+    scene — the crop then keeps that person's side instead of blindly centring.
+    """
+    xs = [
+        x / width
+        for t, x, _a in track
+        if x is not None
+        and any(s <= t < e for s, e in fit_intervals)
+    ]
+    if not xs:
+        return 0.5
+    return min(0.8, max(0.2, float(np.median(xs))))
+
+
+def resolve_auto_output_format(
+    input_path: Path,
+    analysis: Optional[Tuple[List[Any], List[Any], List[float]]] = None,
+) -> str:
+    """Decide a clip's output format for the 'auto' mode.
+
+    Returns AUTO_LANDSCAPE_OUTPUT ("landscape") when the source is wider than
+    9:16 AND the clip's time is dominated by non-face content shots (slides,
+    tweets, screen recordings, horizontal video) — i.e. the scene truly reads
+    better at 16:9. Otherwise returns "vertical". ``analysis`` (dominant_track,
+    tracks, scene_cuts) may be passed in to avoid a second decode pass.
+    """
+    try:
+        width, height = ffprobe_video_size(input_path)
+    except Exception:
+        return "vertical"
+    if width <= 0 or height <= 0 or width / max(height, 1) <= 9 / 16:
+        return "vertical"
+
+    try:
+        duration = ffprobe_duration(input_path)
+    except Exception:
+        duration = 0.0
+    if duration <= 0:
+        return "vertical"
+
+    if analysis is None:
+        try:
+            analysis = analyze_vertical_clip_multi(input_path)
+        except Exception as exc:
+            logger.warning("Auto format analysis failed (%s); using vertical", exc)
+            return "vertical"
+    track, _tracks, scene_cuts = analysis
+    if not track:
+        return "vertical"
+
+    plan = build_layout_plan(track, scene_cuts, duration)
+    fit_time = sum(
+        seg["end"] - seg["start"]
+        for seg in plan
+        if seg["kind"] == "fit"
+    )
+    ratio = fit_time / duration if duration > 0 else 0.0
+    if ratio >= AUTO_FIT_MAJORITY_RATIO:
+        logger.info(
+            "Auto format: %.0f%% content-fit time -> landscape (16:9)",
+            ratio * 100,
+        )
+        return AUTO_LANDSCAPE_OUTPUT
+    logger.info("Auto format: %.0f%% content-fit time -> vertical (9:16)", ratio * 100)
+    return "vertical"
 
 
 def build_vertical_filter_plan(
@@ -2946,19 +3383,28 @@ def build_vertical_filter_plan(
         tail = kenburns_zoom_fragment(duration) or "scale=1080:1920:flags=lanczos,setsar=1"
         return (f"crop={sw}:{sh}:{sx}:{sy},{tail}", "vf")
 
-    # One fast decode pass yields both the face track and the scene cuts.
+    # One fast decode pass yields the face tracks and the scene cuts.
     try:
-        track, scene_cuts = analyze_vertical_clip(input_path)
+        dominant_track, tracks, scene_cuts = analyze_vertical_clip_multi(input_path)
     except Exception as exc:
         logger.warning("Clip analysis failed (%s); using static crop", exc)
-        track, scene_cuts = [], []
+        dominant_track, tracks, scene_cuts = [], [], []
+
+    track = dominant_track
 
     # Auto speaker-pan for two-face clips: the pan plan beats the tracked crop
     # when both faces are real speakers, and is only probed on short-cut clips
-    # so the extra face/motion analysis stays cheap. Falls back to the regular
-    # scene-aware layout when the plan does not qualify.
+    # so the extra face/motion analysis stays cheap. The face centers from the
+    # multi-track pass are reused instead of a second detection pass. Falls
+    # back to the regular scene-aware layout when the plan does not qualify.
     if len(scene_cuts) <= 2:
-        pan_plan = detect_speaker_reframe_plan(input_path, "vertical_pan")
+        face_centers = tracks_to_face_centers(tracks) if tracks else None
+        pan_plan = detect_speaker_reframe_plan(
+            input_path,
+            "vertical_pan",
+            face_centers=face_centers,
+            scene_cut_count=len(scene_cuts),
+        )
         if should_use_speaker_pan(pan_plan, scene_cuts):
             return (
                 f"crop={pan_plan['crop_w']}:{pan_plan['crop_h']}:"
@@ -2967,7 +3413,14 @@ def build_vertical_filter_plan(
                 "vf",
             )
 
-    keys = build_crop_trajectory(track, width, crop_w) if track else []
+    half_widths = (
+        dominant_face_half_widths(track, tracks) if tracks else None
+    )
+    keys = (
+        build_crop_trajectory(track, width, crop_w, half_widths=half_widths)
+        if track
+        else []
+    )
     moving = bool(keys and trajectory_has_movement(keys, crop_w))
     static_x = 0
     if moving:
@@ -3006,8 +3459,15 @@ def build_vertical_filter_plan(
         "Scene-aware vertical layout: %d face shot(s), %d content shot(s)",
         len(face_intervals), len(fit_intervals),
     )
+    fit_crop_x_frac = _fit_crop_x_fraction(track, fit_intervals, width)
     return (
-        build_vertical_compositor_filter(crop_chain, face_intervals, fit_intervals),
+        build_vertical_compositor_filter(
+            crop_chain,
+            face_intervals,
+            fit_intervals,
+            fit_fill=True,
+            fit_crop_x_frac=fit_crop_x_frac,
+        ),
         "complex",
     )
 
@@ -3052,6 +3512,31 @@ def render_reframed_clip_ffmpeg(
             "-vf", f"{subs},setsar=1",
             *build_final_video_encode_args(),
             *audio_args,
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        return run_ffmpeg_command(command).returncode == 0, out_w, out_h
+
+    # "auto" resolves to a real format based on content-shot dominance.
+    if output_format == "auto":
+        output_format = resolve_auto_output_format(input_path)
+
+    # "landscape" (auto-resolved): the clip is dominated by horizontal content
+    # (slides/screen recordings/video), so it is rendered as full 16:9 without
+    # cropping into a vertical strip. Subtitles and fade still apply.
+    if output_format == AUTO_LANDSCAPE_OUTPUT:
+        out_w, out_h = round_to_even(width), round_to_even(height)
+        video_filter = f"scale={out_w}:{out_h}:flags=lanczos,setsar=1"
+        if subs:
+            video_filter = f"{video_filter},{subs}"
+        if fade_args:
+            video_filter = f"{video_filter},{fade_args[0]}"
+        command = [
+            "ffmpeg", "-y", "-i", str(input_path),
+            "-vf", video_filter,
+            *build_final_video_encode_args(),
+            *audio_args,
+            *audio_fade_args,
             "-movflags", "+faststart",
             str(output_path),
         ]
@@ -3672,6 +4157,7 @@ def create_optimized_clip(
             video_path,
             effective_keep_ranges,
             max_extension_seconds=8.0,
+            pull_back_to_complete_sentence=True,
         )
         # Scene-cut snap (DP-6): only when the sentence-boundary extension
         # actually moved the end, pull it forward to the nearest scene cut
@@ -3713,7 +4199,7 @@ def create_optimized_clip(
         keep_original = output_format == "original"
         logger.info(
             f"Creating clip: {start_time:.1f}s - {end_time:.1f}s ({duration:.1f}s) "
-            f"subtitles={add_subtitles} template '{caption_template}' format={'original' if keep_original else 'vertical'}"
+            f"subtitles={add_subtitles} template '{caption_template}' format={output_format}"
         )
 
         # Fast path: no subtitles + original = ffmpeg stream copy (no re-encoding)
@@ -3756,12 +4242,17 @@ def create_optimized_clip(
             reframe_format = (
                 output_format if output_format in VALID_OUTPUT_FORMATS else "vertical"
             )
+            # "auto" resolves once here so the caption canvas matches the final
+            # frame; the resolved format is passed to the renderer to avoid a
+            # second analysis pass inside render_reframed_clip_ffmpeg.
+            if reframe_format == "auto":
+                reframe_format = resolve_auto_output_format(source_clip_path)
 
             # Output dimensions are known ahead of the render: vertical modes are
-            # always 1080x1920, "original" keeps the (even) source size. Knowing
-            # them lets us build the ASS captions up front and burn them in the
-            # SAME pass as reframing — one encode instead of two.
-            if reframe_format == "original":
+            # always 1080x1920, "original"/"landscape" keep the (even) source
+            # size. Knowing them lets us build the ASS captions up front and burn
+            # them in the SAME pass as reframing — one encode instead of two.
+            if reframe_format in ("original", AUTO_LANDSCAPE_OUTPUT):
                 src_w, src_h = ffprobe_video_size(source_clip_path)
                 target_width, target_height = round_to_even(src_w), round_to_even(src_h)
             else:
@@ -3876,7 +4367,9 @@ def create_clips_from_segments(
                 keep_ranges = build_clip_keep_ranges(
                     video_path, start_seconds, end_seconds, cleanup_settings
                 )
-            keep_ranges = extend_keep_ranges_to_sentence_boundary(video_path, keep_ranges)
+            keep_ranges = extend_keep_ranges_to_sentence_boundary(
+                video_path, keep_ranges, pull_back_to_complete_sentence=True
+            )
 
             success = create_optimized_clip(
                 video_path,
