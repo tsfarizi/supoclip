@@ -164,3 +164,92 @@ async def test_cached_transcript_with_sidecar_skips_regeneration(
     # Control claim: valid sidecar present -> fast path preserved, no regeneration.
     assert calls == []
     assert result["transcript"] == "cached transcript text"
+
+
+# --- process_video_complete guard F1 failure handling (contract clause under
+# falsification): when guard F1 triggers regeneration because the word-timing
+# sidecar is missing but the provider is DOWN, a task that already has cached
+# transcript text must NOT hard-fail. It must log a warning and fall back to
+# cached_transcript. Only tasks with NO cached transcript text may propagate the
+# regeneration failure (transcription is mandatory there).
+
+
+def _patch_pipeline_env_raising(monkeypatch, video_path: Path, calls: list) -> None:
+    """Stub the process_video_complete seams; generate_transcript raises.
+
+    Mirrors _patch_pipeline_env except the faked generate_transcript records the
+    call and then raises RuntimeError("provider down"), simulating a dead
+    transcription provider (e.g. local ASR connection refused).
+    """
+    config = SimpleNamespace(
+        transcript_provider="local_asr",
+        fast_mode_transcript_model="nano",
+        max_video_duration=5400,
+        fast_mode_max_clips=4,
+        clip_duration=30,
+    )
+    monkeypatch.setattr(video_service_module, "get_config", lambda: config)
+    monkeypatch.setattr(
+        VideoService, "resolve_local_video_path", lambda url: video_path
+    )
+    monkeypatch.setattr(VideoService, "_get_file_duration", lambda path: None)
+
+    async def fake_generate_transcript(video_path, processing_mode=None):
+        calls.append((video_path, processing_mode))
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(VideoService, "generate_transcript", fake_generate_transcript)
+
+
+@pytest.mark.asyncio
+async def test_cached_transcript_falls_back_when_regeneration_fails(
+    monkeypatch, tmp_path
+) -> None:
+    # Precondition: cached transcript text EXISTS but the word-timing sidecar is
+    # ABSENT, so guard F1 attempts regeneration -- and the provider is down.
+    video_file = tmp_path / "fake.mp4"
+    video_file.write_bytes(b"not a real mp4")
+    assert not (tmp_path / "fake.transcript_cache.json").exists()
+
+    calls: list = []
+    _patch_pipeline_env_raising(monkeypatch, video_file, calls)
+
+    result = await VideoService.process_video_complete(
+        url="upload://fake.mp4",
+        source_type="video_url",
+        cached_transcript="cached transcript",
+        cached_analysis_json=_CACHED_ANALYSIS_JSON,
+    )
+
+    # Regression claim: cached transcript text is a valid fallback when sidecar
+    # regeneration fails -- the task must NOT hard-fail; it continues and returns
+    # the cached transcript. The guard did attempt regeneration (proving the
+    # failing path was reached), and the pipeline survived it.
+    assert calls == [(video_file, "fast")]
+    assert result["transcript"] == "cached transcript"
+
+
+@pytest.mark.asyncio
+async def test_no_cached_transcript_reraises_regeneration_failure(
+    monkeypatch, tmp_path
+) -> None:
+    # Precondition: NO cached transcript text AND no sidecar -> transcription is
+    # mandatory; a provider failure is a real task failure, not a fallback case.
+    video_file = tmp_path / "fake.mp4"
+    video_file.write_bytes(b"not a real mp4")
+    assert not (tmp_path / "fake.transcript_cache.json").exists()
+
+    calls: list = []
+    _patch_pipeline_env_raising(monkeypatch, video_file, calls)
+
+    # Control claim: without cached transcript text the regeneration failure must
+    # propagate -- the task genuinely needs a transcript.
+    with pytest.raises(RuntimeError, match="provider down"):
+        await VideoService.process_video_complete(
+            url="upload://fake.mp4",
+            source_type="video_url",
+            cached_transcript=None,
+            cached_analysis_json=_CACHED_ANALYSIS_JSON,
+        )
+
+    assert calls == [(video_file, "fast")]

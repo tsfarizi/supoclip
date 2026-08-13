@@ -536,9 +536,17 @@ class VideoService:
                     logger.info(
                         "Cached transcript present but word-timing sidecar missing; re-transcribing"
                     )
-                transcript = await VideoService.generate_transcript(
-                    video_path, processing_mode=processing_mode
-                )
+                try:
+                    transcript = await VideoService.generate_transcript(
+                        video_path, processing_mode=processing_mode
+                    )
+                except Exception as exc:
+                    if not cached_transcript:
+                        raise
+                    logger.warning(
+                        "Re-transcription failed (%s); falling back to cached transcript", exc
+                    )
+                    transcript = cached_transcript
 
             # Step 3: AI analysis
             if should_cancel and await should_cancel():
