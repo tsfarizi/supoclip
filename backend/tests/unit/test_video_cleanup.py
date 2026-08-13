@@ -265,3 +265,82 @@ def test_create_optimized_clip_fast_path_uses_keep_range_start(monkeypatch, tmp_
     command = captured["command"]
     assert command[command.index("-ss") + 1] == "10.5"
     assert command[command.index("-t") + 1] == "9.5"
+
+
+def test_original_fast_path_skipped_when_hook_title(monkeypatch, tmp_path):
+    commands: list[list[str]] = []
+
+    class _CompletedProcess:
+        returncode = 0
+        stderr = ""
+
+    def fake_subprocess_run(command, **_kwargs):
+        # The fast path shells out via subprocess.run directly (bypassing
+        # run_ffmpeg_command), so capture it to prove it is never taken.
+        commands.append(command)
+        return _CompletedProcess()
+
+    def fake_run_ffmpeg_command(command, **_kwargs):
+        commands.append(command)
+        # The burn command's output (final.mp4) must exist for the subsequent
+        # shutil.move to succeed.
+        Path(command[-1]).write_bytes(b"video")
+        return _CompletedProcess()
+
+    def fake_render_source_ranges_ffmpeg(_video_path, _keep_ranges, output_path):
+        Path(output_path).write_bytes(b"video")
+        return True
+
+    def fake_build_assemblyai_ass_subtitles(*args, **_kwargs):
+        # output_ass_path is the 6th positional argument of the call site.
+        ass_path = args[5]
+        ass_path.write_text(
+            "[Events]\n"
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+            "Effect, Text\n"
+            "Dialogue: 0,0:00:00.00,0:00:01.00,D,,0,0,0,,hook\n",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "src.video_utils.render_source_ranges_ffmpeg",
+        fake_render_source_ranges_ffmpeg,
+    )
+    monkeypatch.setattr("src.video_utils.ffprobe_video_size", lambda _path: (640, 360))
+    monkeypatch.setattr("src.video_utils.ffprobe_has_audio", lambda _path: False)
+    monkeypatch.setattr("src.video_utils.ffprobe_duration", lambda _path: 10.0)
+    monkeypatch.setattr(
+        "src.video_utils.build_assemblyai_ass_subtitles",
+        fake_build_assemblyai_ass_subtitles,
+    )
+    monkeypatch.setattr(
+        "src.video_utils.run_ffmpeg_command", fake_run_ffmpeg_command
+    )
+    monkeypatch.setattr("src.video_utils.shutil.move", lambda _src, _dst: None)
+
+    success = create_optimized_clip(
+        video_path=Path("/tmp/demo.mp4"),
+        start_time=10.0,
+        end_time=20.0,
+        output_path=tmp_path / "clip.mp4",
+        add_subtitles=False,
+        output_format="original",
+        keep_ranges=[(10.5, 20.0)],
+        hook_title="SHOCKING HEADLINE",
+    )
+
+    def _is_stream_copy(command):
+        return any(
+            token == "-c"
+            and index + 1 < len(command)
+            and command[index + 1] == "copy"
+            for index, token in enumerate(command)
+        )
+
+    assert success is True
+    assert not any(_is_stream_copy(command) for command in commands)
+    assert any(
+        "subtitles=" in arg for command in commands for arg in command
+    )

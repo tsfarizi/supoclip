@@ -1816,6 +1816,9 @@ def build_assemblyai_ass_subtitles(
             relevant_words = get_words_for_keep_ranges(transcript_data, keep_ranges)
         else:
             relevant_words = get_words_in_range(transcript_data, clip_start, clip_end)
+    if include_captions and not relevant_words:
+        suffix = "rendering hook title only" if hook_title else "no captions will be rendered"
+        logger.warning(f"captions requested but no word data; {suffix}")
     if not relevant_words and not hook_title:
         logger.warning("No words or hook title available for ASS subtitles")
         return False
@@ -4203,7 +4206,7 @@ def create_optimized_clip(
         )
 
         # Fast path: no subtitles + original = ffmpeg stream copy (no re-encoding)
-        if not add_subtitles and keep_original and len(effective_keep_ranges) == 1:
+        if not add_subtitles and not hook_title and keep_original and len(effective_keep_ranges) == 1:
             fast_path_start, fast_path_end = effective_keep_ranges[0]
             result = subprocess.run(
                 [

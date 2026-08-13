@@ -1,3 +1,4 @@
+import logging
 import os
 from unittest.mock import patch
 from pathlib import Path
@@ -305,3 +306,35 @@ def test_build_clip_signal_summary_surfaces_hook_and_audio_peak(monkeypatch, tmp
     assert "Wait what happened?" in summary
     assert "audio energy peak" in summary
     assert "question/hook" in summary
+
+
+def test_captions_requested_but_no_words_logs_warning(caplog, tmp_path):
+    caplog.set_level(logging.WARNING, logger="src.video_utils")
+
+    # No transcript sidecar is created, so there is no word data to render.
+    video_path = tmp_path / "source.mp4"
+
+    success = video_utils.build_assemblyai_ass_subtitles(
+        video_path,
+        clip_start=0.0,
+        clip_end=1.0,
+        video_width=1080,
+        video_height=1920,
+        output_ass_path=tmp_path / "captions.ass",
+        caption_template="default",
+        hook_title="SOME HEADLINE",
+        include_captions=True,
+    )
+
+    assert success is True
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "src.video_utils" and record.levelno == logging.WARNING
+    ]
+    assert any(
+        "captions requested but no word data" in message
+        for message in warning_messages
+    )
+    content = (tmp_path / "captions.ass").read_text(encoding="utf-8")
+    assert "Dialogue:" in content
