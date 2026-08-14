@@ -144,6 +144,123 @@ async def test_create_single_clip_keeps_timing_fields_consistent(monkeypatch, tm
     assert clip["end_time"] == "00:20"
 
 
+@pytest.mark.asyncio
+async def test_create_single_clip_accepts_positional_cleanup_and_keyword_hook_persist(
+    monkeypatch, tmp_path
+):
+    """REGRESSION: production call pattern at task_service.py:343-356.
+
+    The worker passes `cleanup_settings` POSITIONALLY (11th argument) and
+    `hook_persist` as a KEYWORD. The current signature declares hook_persist
+    BEFORE cleanup_settings, so the positional cleanup_settings binds to
+    hook_persist and the keyword collides -> TypeError. This test calls the
+    service exactly like production so the collision is caught by the suite.
+    """
+    video_path = tmp_path / "input.mp4"
+    video_path.write_bytes(b"video")
+    segment = {"start_time": "00:10", "end_time": "00:20", "text": "hello"}
+    cleanup_settings = {"cut_long_pauses": True}
+    hook_persist = True
+
+    captured: dict[str, object] = {}
+
+    def fake_create_optimized_clip(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return True
+
+    monkeypatch.setattr(
+        "src.services.video_service.create_optimized_clip",
+        fake_create_optimized_clip,
+    )
+    monkeypatch.setattr(
+        "src.services.video_service.build_clip_keep_ranges",
+        lambda *_args, **_kwargs: [(10.0, 11.0), (12.0, 14.0)],
+    )
+    monkeypatch.setattr(
+        "src.services.video_service.extend_keep_ranges_to_sentence_boundary",
+        lambda _video_path, keep_ranges, **_kwargs: keep_ranges,
+    )
+    monkeypatch.setattr(
+        "src.services.video_service.save_clip_source_ranges",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.services.video_service.apply_broll_suggestions_to_clip",
+        lambda *_args, **_kwargs: None,
+    )
+
+    clip_info = await VideoService.create_single_clip(
+        video_path,
+        segment,
+        0,
+        tmp_path,
+        "Arial",  # font_family
+        24,  # font_size
+        "#FFFFFF",  # font_color
+        "default",  # caption_template
+        "vertical",  # output_format
+        False,  # add_subtitles
+        cleanup_settings,  # POSITIONAL 11th argument (production order)
+        hook_persist=hook_persist,
+    )
+
+    assert clip_info is not None
+    assert captured["kwargs"]["hook_persist"] is hook_persist
+    assert captured["args"][4] is False  # add_subtitles
+    assert captured["args"][9] == "vertical"  # output_format
+    assert captured["args"][10] == [(10.0, 11.0), (12.0, 14.0)]  # keep_ranges
+
+
+@pytest.mark.asyncio
+async def test_create_video_clips_accepts_positional_cleanup_and_keyword_hook_persist(
+    monkeypatch, tmp_path
+):
+    """REGRESSION: production call pattern at task_service.py:837-848.
+
+    The worker passes `cleanup_settings` POSITIONALLY (9th argument) and
+    `hook_persist` as a KEYWORD. The current signature declares hook_persist
+    BEFORE cleanup_settings, so the positional cleanup_settings binds to
+    hook_persist and the keyword collides -> TypeError.
+    """
+    video_path = tmp_path / "input.mp4"
+    video_path.write_bytes(b"video")
+    cleanup_settings = {"cut_long_pauses": True}
+
+    captured: dict[str, object] = {}
+
+    def fake_create_clips_with_transitions(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(
+        "src.services.video_service.create_clips_with_transitions",
+        fake_create_clips_with_transitions,
+    )
+
+    clips = await VideoService.create_video_clips(
+        video_path,
+        [],  # segments
+        "Arial",  # font_family
+        24,  # font_size
+        "#FFFFFF",  # font_color
+        "default",  # caption_template
+        "vertical",  # output_format
+        False,  # add_subtitles
+        cleanup_settings,  # POSITIONAL 9th argument (production order)
+        hook_persist=True,
+    )
+
+    assert clips == []
+    assert captured["kwargs"]["hook_persist"] is True
+    assert captured["args"][0] is video_path
+    assert captured["args"][1] == []  # segments
+    assert captured["args"][7] == "vertical"  # output_format
+    assert captured["args"][8] is False  # add_subtitles
+    assert captured["args"][9] is cleanup_settings
+
+
 def test_create_clips_from_segments_keeps_timing_fields_consistent(
     monkeypatch, tmp_path
 ):

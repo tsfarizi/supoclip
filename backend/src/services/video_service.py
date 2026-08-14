@@ -255,8 +255,8 @@ class VideoService:
         caption_template: str = "default",
         output_format: str = "vertical",
         add_subtitles: bool = True,
-        hook_persist: bool = False,
         cleanup_settings: Optional[Dict[str, Any]] = None,
+        hook_persist: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Create standalone video clips from segments with optional subtitles.
@@ -299,8 +299,8 @@ class VideoService:
         caption_template: str = "default",
         output_format: str = "vertical",
         add_subtitles: bool = True,
-        hook_persist: bool = False,
         cleanup_settings: Optional[Dict[str, Any]] = None,
+        hook_persist: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
         try:
