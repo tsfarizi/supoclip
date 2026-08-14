@@ -238,36 +238,14 @@ async def test_apply_single_transition_copies_clip_source_map(monkeypatch, tmp_p
     assert load_clip_source_ranges(transitioned_path) == [(10.0, 11.0), (12.0, 14.0)]
 
 
-def test_create_optimized_clip_fast_path_uses_keep_range_start(monkeypatch, tmp_path):
-    captured: dict[str, object] = {}
+def test_original_never_uses_stream_copy(monkeypatch, tmp_path):
+    """Original format ALWAYS runs the full render pipeline — no `-c copy`.
 
-    class _CompletedProcess:
-        returncode = 0
-        stderr = ""
-
-    def fake_run(command, **_kwargs):
-        captured["command"] = command
-        return _CompletedProcess()
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-
-    success = create_optimized_clip(
-        video_path=Path("/tmp/demo.mp4"),
-        start_time=10.0,
-        end_time=20.0,
-        output_path=tmp_path / "clip.mp4",
-        add_subtitles=False,
-        output_format="original",
-        keep_ranges=[(10.5, 20.0)],
-    )
-
-    assert success is True
-    command = captured["command"]
-    assert command[command.index("-ss") + 1] == "10.5"
-    assert command[command.index("-t") + 1] == "9.5"
-
-
-def test_original_fast_path_skipped_when_hook_title(monkeypatch, tmp_path):
+    The stream-copy fast path (add_subtitles=False + original + single keep
+    range) is REMOVED from the contract. Every original clip must go through
+    render_source_ranges_ffmpeg -> render_reframed_clip_ffmpeg and land on the
+    1080x1920 WHITE canvas (pad=1080:1920 ... color=white).
+    """
     commands: list[list[str]] = []
 
     class _CompletedProcess:
@@ -275,15 +253,16 @@ def test_original_fast_path_skipped_when_hook_title(monkeypatch, tmp_path):
         stderr = ""
 
     def fake_subprocess_run(command, **_kwargs):
-        # The fast path shells out via subprocess.run directly (bypassing
-        # run_ffmpeg_command), so capture it to prove it is never taken.
+        # The removed fast path shells out via subprocess.run directly
+        # (bypassing run_ffmpeg_command). Keep capturing it so any resurrected
+        # fast path is caught by the `-c copy` assertion below.
         commands.append(command)
         return _CompletedProcess()
 
     def fake_run_ffmpeg_command(command, **_kwargs):
         commands.append(command)
-        # The burn command's output (final.mp4) must exist for the subsequent
-        # shutil.move to succeed.
+        # The final render command's output (final.mp4) must exist for the
+        # subsequent shutil.move to succeed.
         Path(command[-1]).write_bytes(b"video")
         return _CompletedProcess()
 
@@ -292,13 +271,13 @@ def test_original_fast_path_skipped_when_hook_title(monkeypatch, tmp_path):
         return True
 
     def fake_build_assemblyai_ass_subtitles(*args, **_kwargs):
-        # output_ass_path is the 6th positional argument of the call site.
+        # Defensive seam: if the new pipeline builds an ASS sidecar even for a
+        # captionless render, hand it a minimal valid file.
         ass_path = args[5]
         ass_path.write_text(
             "[Events]\n"
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
-            "Effect, Text\n"
-            "Dialogue: 0,0:00:00.00,0:00:01.00,D,,0,0,0,,hook\n",
+            "Effect, Text\n",
             encoding="utf-8",
         )
         return True
@@ -328,7 +307,6 @@ def test_original_fast_path_skipped_when_hook_title(monkeypatch, tmp_path):
         add_subtitles=False,
         output_format="original",
         keep_ranges=[(10.5, 20.0)],
-        hook_title="SHOCKING HEADLINE",
     )
 
     def _is_stream_copy(command):
@@ -340,7 +318,14 @@ def test_original_fast_path_skipped_when_hook_title(monkeypatch, tmp_path):
         )
 
     assert success is True
-    assert not any(_is_stream_copy(command) for command in commands)
-    assert any(
-        "subtitles=" in arg for command in commands for arg in command
+    assert commands, "original render must shell out at least once"
+    assert not any(_is_stream_copy(command) for command in commands), (
+        "original format must NEVER use stream copy: "
+        f"found `-c copy` in {commands!r}"
     )
+    assert any(
+        "pad=1080:1920" in arg for command in commands for arg in command
+    ), "original render must pad onto a 1080x1920 canvas"
+    assert any(
+        "color=white" in arg for command in commands for arg in command
+    ), "original render must use a WHITE pad colour"

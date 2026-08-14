@@ -528,6 +528,20 @@ def round_to_even(value: int) -> int:
     return value - (value % 2)
 
 
+def compute_white_canvas_layout(src_w: int, src_h: int) -> Tuple[int, int, int, int]:
+    """Compute the fitted source size and white bands on a 1080x1920 canvas.
+
+    The source is scaled to fit full-frame (preserving aspect ratio,
+    even-truncated) and centred vertically; the leftover height becomes equal
+    top/bottom white bands. Returns (fit_w, fit_h, top_white, bottom_white).
+    """
+    scale = min(1080 / src_w, 1920 / src_h)
+    fit_w = round_to_even(int(round(src_w * scale)))
+    fit_h = round_to_even(int(round(src_h * scale)))
+    band = (1920 - fit_h) // 2
+    return fit_w, fit_h, band, band
+
+
 def clamp_even(value: int, minimum: int, maximum: int) -> int:
     """Clamp an integer to an even value within inclusive bounds."""
     if maximum < minimum:
@@ -1697,6 +1711,8 @@ def build_hook_title_ass(
     output_duration: float,
     font_name: str,
     caption_font_px: int,
+    hook_persist: bool = False,
+    hook_margin_v_override: Optional[float] = None,
 ) -> Tuple[str, List[str]]:
     """Build the (style_line, dialogue_events) for a burned-in hook title.
 
@@ -1756,14 +1772,21 @@ def build_hook_title_ass(
     text = "\\N".join(rendered_lines)
 
     start = 0.12
-    end = min(HOOK_TITLE_SECONDS, max(HOOK_TITLE_MIN_SECONDS, output_duration - 0.25))
-    if output_duration <= HOOK_TITLE_MIN_SECONDS:
-        start, end = 0.0, max(0.5, output_duration)
+    if hook_persist:
+        # Contract: a persisted hook stays on screen for the WHOLE clip.
+        end = output_duration
+        if output_duration <= HOOK_TITLE_MIN_SECONDS:
+            start = 0.0
+    else:
+        end = min(HOOK_TITLE_SECONDS, max(HOOK_TITLE_MIN_SECONDS, output_duration - 0.25))
+        if output_duration <= HOOK_TITLE_MIN_SECONDS:
+            start, end = 0.0, max(0.5, output_duration)
     entrance = "\\fad(160,240)"
     if template.get("word_pop", True):
         entrance += "\\fscx90\\fscy90\\t(0,160,\\fscx100\\fscy100)"
+    event_margin_v = int(hook_margin_v_override) if hook_margin_v_override is not None else 0
     events = [
-        f"Dialogue: 1,{ass_timestamp(start)},{ass_timestamp(end)},Hook,,0,0,0,,"
+        f"Dialogue: 1,{ass_timestamp(start)},{ass_timestamp(end)},Hook,,0,0,{event_margin_v},,"
         f"{{{entrance}}}{text}"
     ]
     return style_line, events
@@ -1787,6 +1810,8 @@ def build_assemblyai_ass_subtitles(
     caption_words: Optional[List[Dict[str, Any]]] = None,
     position_y_override: Optional[float] = None,
     highlight_words: Optional[List[str]] = None,
+    hook_persist: bool = False,
+    hook_margin_v_override: Optional[float] = None,
 ) -> bool:
     """Generate animated word-synced ASS subtitles from cached AssemblyAI words.
 
@@ -1888,6 +1913,8 @@ def build_assemblyai_ass_subtitles(
             output_duration,
             font_name,
             font_px,
+            hook_persist=hook_persist,
+            hook_margin_v_override=hook_margin_v_override,
         )
         hook_style_block = f"{hook_style_line}\n"
 
@@ -3506,18 +3533,18 @@ def render_reframed_clip_ffmpeg(
     )
 
     if output_format == "original":
-        out_w, out_h = round_to_even(width), round_to_even(height)
-        if not subs:
-            shutil.copyfile(input_path, output_path)
-            return True, out_w, out_h
-        command = [
-            "ffmpeg", "-y", "-i", str(input_path),
-            "-vf", f"{subs},setsar=1",
-            *build_final_video_encode_args(),
-            *audio_args,
-            "-movflags", "+faststart",
-            str(output_path),
-        ]
+        out_w, out_h = 1080, 1920
+        video_filter = (
+            "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=white,"
+            "setsar=1"
+        )
+        if subs:
+            video_filter = f"{video_filter},{subs}"
+        command = ["ffmpeg", "-y", "-i", str(input_path), "-vf", video_filter,
+            *build_final_video_encode_args(), *audio_args,
+            "-movflags", "+faststart", str(output_path)]
         return run_ffmpeg_command(command).returncode == 0, out_w, out_h
 
     # "auto" resolves to a real format based on content-shot dominance.
@@ -4142,8 +4169,10 @@ def create_optimized_clip(
     output_format: str = "vertical",
     keep_ranges: Optional[List[Tuple[float, float]]] = None,
     hook_title: Optional[str] = None,
+    hook_persist: bool = False,
 ) -> bool:
-    """Create clip with optional subtitles. output_format: 'vertical' (9:16) or 'original' (keep source size)."""
+    """Create clip with optional subtitles. output_format: 'vertical' (9:16),
+    'original' (1080x1920 white-canvas fit) or 'auto'."""
     try:
         if keep_ranges:
             effective_keep_ranges = normalize_source_ranges(keep_ranges)
@@ -4199,35 +4228,10 @@ def create_optimized_clip(
             logger.error(f"Invalid clip duration: {duration:.1f}s")
             return False
 
-        keep_original = output_format == "original"
         logger.info(
             f"Creating clip: {start_time:.1f}s - {end_time:.1f}s ({duration:.1f}s) "
             f"subtitles={add_subtitles} template '{caption_template}' format={output_format}"
         )
-
-        # Fast path: no subtitles + original = ffmpeg stream copy (no re-encoding)
-        if not add_subtitles and not hook_title and keep_original and len(effective_keep_ranges) == 1:
-            fast_path_start, fast_path_end = effective_keep_ranges[0]
-            result = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-ss", str(fast_path_start),
-                    "-i", str(video_path),
-                    "-t", str(fast_path_end - fast_path_start),
-                    "-c", "copy",
-                    "-movflags", "+faststart",
-                    str(output_path),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if result.returncode != 0:
-                logger.error(f"ffmpeg stream copy failed: {result.stderr}")
-                return False
-            logger.info(f"Successfully created clip (stream copy): {output_path}")
-            return True
 
         with tempfile.TemporaryDirectory(prefix="supoclip_render_") as temp_dir:
             temp_root = Path(temp_dir)
@@ -4252,14 +4256,32 @@ def create_optimized_clip(
                 reframe_format = resolve_auto_output_format(source_clip_path)
 
             # Output dimensions are known ahead of the render: vertical modes are
-            # always 1080x1920, "original"/"landscape" keep the (even) source
-            # size. Knowing them lets us build the ASS captions up front and burn
-            # them in the SAME pass as reframing — one encode instead of two.
-            if reframe_format in ("original", AUTO_LANDSCAPE_OUTPUT):
+            # always 1080x1920, "original" is the 1080x1920 WHITE canvas,
+            # "landscape" keeps the (even) source size. Knowing them lets us
+            # build the ASS captions up front and burn them in the SAME pass as
+            # reframing — one encode instead of two.
+            if reframe_format == AUTO_LANDSCAPE_OUTPUT:
                 src_w, src_h = ffprobe_video_size(source_clip_path)
                 target_width, target_height = round_to_even(src_w), round_to_even(src_h)
             else:
                 target_width, target_height = 1080, 1920
+
+            # White-canvas geometry: on "original" the source sits centred on a
+            # 1080x1920 canvas with white bands above/below. When a band is
+            # large, captions are pushed down (position_y_override) and the hook
+            # title is dropped lower (hook_margin_v_override) so both stay on
+            # the white canvas instead of overlapping the fitted video.
+            position_y_override = None
+            hook_margin_v_override = None
+            if reframe_format == "original":
+                src_w, src_h = ffprobe_video_size(source_clip_path)
+                _fit_w, _fit_h, top_white, bottom_white = compute_white_canvas_layout(
+                    src_w, src_h
+                )
+                if bottom_white >= 200:
+                    position_y_override = (1920 - bottom_white * 0.5) / 1920
+                if top_white >= 200:
+                    hook_margin_v_override = int(top_white * 0.5)
 
             burn_ass_path: Optional[Path] = None
             fonts_dir: Optional[Path] = None
@@ -4277,6 +4299,9 @@ def create_optimized_clip(
                 effective_keep_ranges,
                 hook_title=hook_title,
                 include_captions=add_subtitles,
+                position_y_override=position_y_override,
+                hook_margin_v_override=hook_margin_v_override,
+                hook_persist=hook_persist,
             ):
                 burn_ass_path = ass_path
                 fonts_dir = ass_fonts_dir(
@@ -4313,6 +4338,7 @@ def create_clips_from_segments(
     output_format: str = "vertical",
     add_subtitles: bool = True,
     cleanup_settings: Optional[Dict[str, Any]] = None,
+    hook_persist: bool = False,
 ) -> List[Dict[str, Any]]:
     """Create optimized video clips from segments with template support."""
     logger.info(
@@ -4387,6 +4413,7 @@ def create_clips_from_segments(
                 output_format,
                 keep_ranges,
                 hook_title=segment.get("hook_title"),
+                hook_persist=hook_persist,
             )
 
             if success:
@@ -4547,6 +4574,7 @@ def create_clips_with_transitions(
     output_format: str = "vertical",
     add_subtitles: bool = True,
     cleanup_settings: Optional[Dict[str, Any]] = None,
+    hook_persist: bool = False,
 ) -> List[Dict[str, Any]]:
     """Create standalone video clips without inter-clip transitions.
 
@@ -4569,6 +4597,7 @@ def create_clips_with_transitions(
         output_format,
         add_subtitles,
         cleanup_settings,
+        hook_persist,
     )
 
 

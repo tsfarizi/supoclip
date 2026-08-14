@@ -1,33 +1,40 @@
-"""Golden end-to-end harness: original-format clip with burned word captions.
+"""Golden end-to-end harness: original-format WHITE-CANVAS clip with captions.
 
-Verifies the F1 fix's runtime contract through the REAL ffmpeg binary — the
+Verifies the NEW original-format contract through the REAL ffmpeg binary — the
 render pass is never mocked. The only test-side wrapper around
 `video_utils.run_ffmpeg_command` substitutes the resolved ffmpeg/ffprobe
 executables for the bare names (matching `test_clip_quality.py`).
 
 Contracts under falsification
 -----------------------------
-1. `create_optimized_clip(..., output_format="original", add_subtitles=True)`
-   burns word-synced captions INTO the output frame: with a valid transcript
-   sidecar (<video>.transcript_cache.json) present, a frame extracted at
-   t=1.0s must contain bright caption pixels (white text on black). This is
-   the exact payload the F1 guard must guarantee: the sidecar must exist
-   before an "original" clip with captions can render anything but a bare
-   hook title.
-2. Control — `add_subtitles=False` must render NO caption pixels: the
-   original-format fast path (stream copy, F4) keeps the source frame
-   untouched, so the bright-pixel count stays at ~0.
+1. `create_optimized_clip(..., output_format="original")` renders a
+   1080x1920 canvas. A 640x360 source is fit full-frame
+   (`force_original_aspect_ratio=decrease`, even-truncated) and centred on a
+   WHITE background (`pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=white`). Both a
+   captioned render (A) and a captionless render (B) must probe at 1080x1920 —
+   the old "keep source size" behaviour (and the stream-copy fast path) is GONE.
+2. A — valid transcript sidecar + `add_subtitles=True` — burns word-synced
+   captions INTO the output frame. At t=1.0s the bottom band y in [1264, 1920)
+   (below the 1080x608 fitted video; 656px of white canvas) must contain a
+   significant number of NON-white pixels: the active word "supo" is yellow
+   (#FFE000) and every word carries a black outline, so the caption area is
+   anything but the surrounding white canvas.
+3. B — `add_subtitles=False` — must be a bare white-canvas render: the same
+   bottom band is pure white (near-zero non-white pixels). This is the control:
+   on the NEW contract B is NOT the untouched source (fast path removed); it is
+   a real 1080x1920 white-canvas encode with nothing burned into the frame.
 
 Honesty notes (read before trusting a red/green)
-------------------------------------------------
+-----------------------------------------------
 * The ASS burn happens inside `render_reframed_clip_ffmpeg` via the
   `subtitles` filter (libass). If the bundled ffmpeg lacks libass the render
   returns False and the test FAILS honestly — it is never masked.
-* The stream-copy control path shells to bare `ffmpeg` directly; the
-  session-autouse `ffmpeg_bin_dir_on_path` fixture in tests/conftest.py puts
-  the bundled binaries on PATH.
-* The synthetic clip is solid black + a sine tone: every bright pixel in the
-  A render is caption text, there is no scene content to confuse the count.
+* The synthetic clip is solid black + a sine tone: every non-white pixel in the
+  bottom band of the A render is caption text/outline, there is no scene
+  content to confuse the count.
+* The white canvas itself is BRIGHT — this harness never asserts on "bright
+  pixels"; it asserts on NON-white pixels (min(r,g,b) < 245) inside the bottom
+  band only.
 * Frame parsing is PURE Python (bytes/struct over an rgb24 pipe) — PIL and
   numpy are deliberately not used.
 * The transcript sidecar words end at exactly 2500 ms with a sentence-ending
@@ -155,10 +162,19 @@ class RecordingRunner:
 
 
 # ---------------------------------------------------------------------------
-# Pure-Python frame parser (no PIL/numpy): rgb24 pipe -> bright pixel count
+# Pure-Python frame parser (no PIL/numpy): rgb24 pipe -> non-white pixel count
 # ---------------------------------------------------------------------------
-def _count_bright_pixels(ffmpeg_bin: str, video_path: Path, t: float, width: int, height: int) -> int:
-    """Decode one frame at t and count pixels with max(r,g,b) > 200."""
+def _count_non_white_pixels_in_band(
+    ffmpeg_bin: str,
+    video_path: Path,
+    t: float,
+    width: int,
+    height: int,
+    y_start: int,
+    y_end: int,
+) -> int:
+    """Decode one frame at t and count pixels in rows [y_start, y_end) whose
+    min(r,g,b) < 245 — i.e. anything that is NOT the white canvas."""
     result = subprocess.run(
         [
             ffmpeg_bin, "-v", "error",
@@ -178,18 +194,28 @@ def _count_bright_pixels(ffmpeg_bin: str, video_path: Path, t: float, width: int
         f"short raw frame: got {len(result.stdout)} bytes, expected {expected}"
     )
     data = result.stdout[:expected]
-    bright = 0
-    for i in range(0, expected, 3):
-        if max(data[i], data[i + 1], data[i + 2]) > 200:
-            bright += 1
-    return bright
+    non_white = 0
+    band_end = min(y_end, height)
+    for y in range(y_start, band_end):
+        row_offset = y * width * 3
+        for x in range(width):
+            i = row_offset + x * 3
+            if min(data[i], data[i + 1], data[i + 2]) < 245:
+                non_white += 1
+    return non_white
 
 
 # ---------------------------------------------------------------------------
-# F1 runtime proof: original format + burned captions vs stream-copy control
+# NEW contract proof: 1080x1920 white canvas; captions burned, control blank
 # ---------------------------------------------------------------------------
-class TestOriginalFormatCaptions:
-    def test_captions_burned_into_original_format(
+# 640x360 (16:9) fit into 1080x1920: scale to 1080x608, banded 656/656.
+# The bottom band of white canvas is y in [1264, 1920) — 656 rows.
+CANVAS_W, CANVAS_H = 1080, 1920
+BAND_START, BAND_END = 1264, 1920
+
+
+class TestOriginalFormatWhiteCanvas:
+    def test_captions_burned_on_1080x1920_white_canvas(
         self, monkeypatch, ffmpeg_toolchain, caption_clip, tmp_path
     ):
         out_a = tmp_path / "captions_on.mp4"
@@ -226,21 +252,41 @@ class TestOriginalFormatCaptions:
         assert out_a.exists() and out_a.stat().st_size > 0, "captions-on output missing/empty"
         assert out_b.exists() and out_b.stat().st_size > 0, "captions-off output missing/empty"
 
-        width, height = video_utils.ffprobe_video_size(out_a)
-        assert (width, height) == (640, 360), f"original format size {(width, height)}"
+        size_a = video_utils.ffprobe_video_size(out_a)
+        size_b = video_utils.ffprobe_video_size(out_b)
+        assert size_a == (CANVAS_W, CANVAS_H), (
+            f"original format (captions) size {size_a}, expected {CANVAS_W}x{CANVAS_H}"
+        )
+        assert size_b == (CANVAS_W, CANVAS_H), (
+            f"original format (no captions) size {size_b}, expected {CANVAS_W}x{CANVAS_H}"
+        )
 
-        bright_a = _count_bright_pixels(
-            ffmpeg_toolchain["ffmpeg"], out_a, 1.0, width, height
+        non_white_a = _count_non_white_pixels_in_band(
+            ffmpeg_toolchain["ffmpeg"],
+            out_a,
+            1.0,
+            CANVAS_W,
+            CANVAS_H,
+            BAND_START,
+            BAND_END,
         )
-        bright_b = _count_bright_pixels(
-            ffmpeg_toolchain["ffmpeg"], out_b, 1.0, width, height
+        non_white_b = _count_non_white_pixels_in_band(
+            ffmpeg_toolchain["ffmpeg"],
+            out_b,
+            1.0,
+            CANVAS_W,
+            CANVAS_H,
+            BAND_START,
+            BAND_END,
         )
 
-        assert bright_a > 50, (
-            "captions NOT burned into original format: "
-            f"only {bright_a} bright pixels at t=1.0s (expected > 50)"
+        assert non_white_a > 50, (
+            "captions NOT burned into the original white canvas: "
+            f"only {non_white_a} non-white pixels in band y=[{BAND_START},{BAND_END}) "
+            "at t=1.0s (expected > 50)"
         )
-        assert bright_b < 10, (
-            "control render shows unexpected caption pixels: "
-            f"{bright_b} bright pixels at t=1.0s (expected < 10)"
+        assert non_white_b < 10, (
+            "control render shows content/caption pixels where the white canvas "
+            f"should be: {non_white_b} non-white pixels in band y=[{BAND_START},{BAND_END}) "
+            "at t=1.0s (expected < 10)"
         )
