@@ -59,6 +59,7 @@ async def process_video_task(
     processing_mode: str = "fast",
     output_format: str = "vertical",
     add_subtitles: bool = True,
+    hook_persist: bool = False,
     include_broll: bool = False,
     cleanup_settings: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
@@ -122,6 +123,7 @@ async def process_video_task(
                 processing_mode=processing_mode,
                 output_format=output_format,
                 add_subtitles=add_subtitles,
+                hook_persist=hook_persist,
                 include_broll=include_broll,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,

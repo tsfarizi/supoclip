@@ -228,6 +228,7 @@ export default function HomeApp() {
   const [availableTemplates, setAvailableTemplates] = useState<Array<{ id: string, name: string, description: string, animation: string, font_family?: string, font_size?: number, font_color?: string }>>([]);
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("vertical");
   const [addSubtitles, setAddSubtitles] = useState(true);
+  const [hookPersist, setHookPersist] = useState(false);
   const [includeBroll, setIncludeBroll] = useState(false);
   const [pexelsConfigured, setPexelsConfigured] = useState<boolean | null>(null);
   const [cutLongPauses, setCutLongPauses] = useState(false);
@@ -578,6 +579,7 @@ export default function HomeApp() {
           processing_mode: "fast",
           output_format: outputFormat,
           add_subtitles: addSubtitles,
+          hook_persist: hookPersist,
           include_broll: includeBroll,
           cut_long_pauses: cutLongPauses,
           pause_threshold_ms: normalizedPauseThreshold,
@@ -601,6 +603,7 @@ export default function HomeApp() {
         caption_template: captionTemplate,
         output_format: outputFormat,
         add_subtitles: addSubtitles,
+        hook_persist: hookPersist,
         include_broll: includeBroll,
         cut_long_pauses: cutLongPauses,
         pause_threshold_ms: normalizedPauseThreshold,
@@ -1116,6 +1119,22 @@ export default function HomeApp() {
                     <Switch
                       checked={addSubtitles}
                       onCheckedChange={setAddSubtitles}
+                      disabled={generationControlsDisabled}
+                    />
+                  </div>
+
+                  {/* Keep hook on screen */}
+                  <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
+                    <div className="flex items-center gap-3">
+                      <Sparkles className="w-4 h-4 text-emerald-500" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Keep hook on screen</h3>
+                        <p className="text-xs text-stone-500">Keep the hook headline visible for the whole clip</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={hookPersist}
+                      onCheckedChange={setHookPersist}
                       disabled={generationControlsDisabled}
                     />
                   </div>

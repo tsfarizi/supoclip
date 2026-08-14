@@ -44,6 +44,7 @@ class TaskRepository:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        hook_persist: bool = False,
         cleanup_settings_json: Optional[Any] = None,
     ) -> str:
         """Create a new task and return its ID."""
@@ -56,13 +57,13 @@ class TaskRepository:
                 INSERT INTO tasks (
                     id, user_id, source_id, status, font_family, font_size, font_color,
                     caption_template, include_broll, processing_mode,
-                    output_format, add_subtitles, cleanup_settings_json,
+                    output_format, add_subtitles, hook_persist, cleanup_settings_json,
                     created_at, updated_at
                 )
                 VALUES (
                     :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
                     :caption_template, :include_broll, :processing_mode,
-                    :output_format, :add_subtitles, CAST(:cleanup_settings_json AS jsonb),
+                    :output_format, :add_subtitles, :hook_persist, CAST(:cleanup_settings_json AS jsonb),
                     NOW(), NOW()
                 )
                 RETURNING id
@@ -80,6 +81,7 @@ class TaskRepository:
                 "processing_mode": processing_mode,
                 "output_format": output_format,
                 "add_subtitles": add_subtitles,
+                "hook_persist": hook_persist,
                 "cleanup_settings_json": _serialize_cleanup_settings_json(
                     cleanup_settings_json
                 ),
@@ -131,6 +133,7 @@ class TaskRepository:
             "processing_mode": row.processing_mode,
             "output_format": row.output_format,
             "add_subtitles": row.add_subtitles,
+            "hook_persist": row.hook_persist,
             "cleanup_settings_json": row.cleanup_settings_json,
             "cache_hit": row.cache_hit,
             "error_code": row.error_code,
@@ -233,6 +236,7 @@ class TaskRepository:
         include_broll: bool,
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        hook_persist: bool = False,
         cleanup_settings_json: Optional[Any] = None,
     ) -> None:
         """Update task styling settings.
@@ -253,6 +257,7 @@ class TaskRepository:
                     include_broll = :include_broll,
                     output_format = :output_format,
                     add_subtitles = :add_subtitles,
+                    hook_persist = :hook_persist,
                     cleanup_settings_json = CAST(:cleanup_settings_json AS jsonb),
                     updated_at = NOW()
                 WHERE id = :task_id
@@ -267,6 +272,7 @@ class TaskRepository:
                 "include_broll": include_broll,
                 "output_format": output_format,
                 "add_subtitles": add_subtitles,
+                "hook_persist": hook_persist,
                 "cleanup_settings_json": _serialize_cleanup_settings_json(
                     cleanup_settings_json
                 ),

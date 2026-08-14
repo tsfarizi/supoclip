@@ -255,13 +255,15 @@ class VideoService:
         caption_template: str = "default",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        hook_persist: bool = False,
         cleanup_settings: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Create standalone video clips from segments with optional subtitles.
         Runs in thread pool as video processing is CPU-intensive.
-        output_format: 'vertical' (9:16) or 'original' (keep source size, faster).
-        add_subtitles: False skips subtitles; with original format uses ffmpeg stream copy (no re-encode).
+        output_format: 'vertical' (9:16) or 'original' (1080x1920 white canvas).
+        add_subtitles: False skips subtitles; the hook title still renders when
+        present, and hook_persist keeps it on screen for the whole clip.
         """
         logger.info(f"Creating {len(segments)} video clips subtitles={add_subtitles}")
         clips_output_dir = Path(get_config().temp_dir) / "clips"
@@ -279,6 +281,7 @@ class VideoService:
             output_format,
             add_subtitles,
             cleanup_settings,
+            hook_persist=hook_persist,
         )
 
         logger.info(f"Successfully created {len(clips_info)} clips")
@@ -296,6 +299,7 @@ class VideoService:
         caption_template: str = "default",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        hook_persist: bool = False,
         cleanup_settings: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
@@ -360,6 +364,7 @@ class VideoService:
                 output_format,
                 keep_ranges,
                 segment.get("hook_title"),
+                hook_persist=hook_persist,
             )
 
             if not success:

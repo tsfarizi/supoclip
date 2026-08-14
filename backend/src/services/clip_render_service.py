@@ -384,6 +384,7 @@ class ClipRenderService:
                 transcript_video_path=transcript_video_path,
                 source_ranges=self._get_clip_source_ranges(clip),
                 output_format=task.get("output_format") or "vertical",
+                hook_persist=bool(task.get("hook_persist", False)),
                 hook_title=clip.get("hook_title"),
                 progress_callback=publish_render_progress,
             )

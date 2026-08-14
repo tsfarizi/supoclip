@@ -262,6 +262,7 @@ def overlay_custom_captions(
     transcript_video_path: Optional[Path] = None,
     source_ranges: Optional[List[tuple[float, float]]] = None,
     output_format: str = "vertical",
+    hook_persist: bool = False,
     hook_title: Optional[str] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Path:
@@ -296,6 +297,7 @@ def overlay_custom_captions(
             output_format=output_format,
             keep_ranges=source_ranges,
             hook_title=hook_title,
+            hook_persist=hook_persist,
         )
         if rendered_clean:
             base_input = clean_path
@@ -341,6 +343,7 @@ def overlay_custom_captions(
         caption_words=caption_words,
         position_y_override=position_y,
         highlight_words=highlight_words,
+        hook_persist=hook_persist,
     ):
         raise RuntimeError("Failed to build edited captions")
 

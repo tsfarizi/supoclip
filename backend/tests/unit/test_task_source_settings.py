@@ -37,6 +37,7 @@ def _legacy_task_dict(task_id: str = "task-123") -> dict:
         "output_format": None,
         "add_subtitles": None,
         "cleanup_settings_json": None,
+        "hook_persist": None,
     }
 
 
@@ -48,6 +49,7 @@ def _default_settings() -> dict:
         "pause_threshold_ms": 900,
         "remove_filler_words": False,
         "filtered_words": [],
+        "hook_persist": False,
     }
 
 
@@ -105,6 +107,8 @@ async def test_load_task_source_settings_uses_db_columns_without_touching_redis(
         "pause_threshold_ms": 1400,
         "remove_filler_words": True,
         "filtered_words": ["basically", "like"],
+        # hook_persist is absent on the task row, so the default false resolves.
+        "hook_persist": False,
     }
 
 
@@ -305,3 +309,78 @@ async def test_load_task_source_settings_sanitizes_invalid_values(monkeypatch):
     assert settings["cut_long_pauses"] is True
     assert settings["remove_filler_words"] is True
     assert settings["filtered_words"] == ["um", "hello"]
+
+
+# ---------------------------------------------------------------------------
+# hook_persist (Schema v3): BOOLEAN NOT NULL DEFAULT false, DB column is the
+# authority over the legacy Redis metadata cache.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_load_task_source_settings_defaults_hook_persist_to_false(monkeypatch):
+    # A legacy row (hook_persist NULL) with no hook_persist in Redis must
+    # resolve to the column default false.
+    monkeypatch.setattr(
+        "src.services.task_metadata_service.get_redis_client",
+        lambda **_kwargs: _RedisClient(
+            json.dumps({"output_format": "vertical", "add_subtitles": True})
+        ),
+    )
+
+    service = TaskService(db=None)
+    settings = await service._load_task_source_settings(_legacy_task_dict())
+
+    assert settings["hook_persist"] is False
+
+
+@pytest.mark.asyncio
+async def test_load_task_source_settings_db_hook_persist_wins_over_redis(monkeypatch):
+    # DB column True must win over a Redis payload that says False.
+    payload = json.dumps(
+        {
+            "output_format": "vertical",
+            "add_subtitles": True,
+            "hook_persist": False,
+        }
+    )
+    monkeypatch.setattr(
+        "src.services.task_metadata_service.get_redis_client",
+        lambda **_kwargs: _RedisClient(payload),
+    )
+
+    task = {
+        "id": "task-123",
+        "output_format": "vertical",
+        "add_subtitles": True,
+        "cleanup_settings_json": None,
+        "hook_persist": True,
+    }
+
+    service = TaskService(db=None)
+    settings = await service._load_task_source_settings(task)
+
+    assert settings["hook_persist"] is True  # DB column wins
+
+
+@pytest.mark.asyncio
+async def test_load_task_source_settings_non_bool_hook_persist_from_redis_falls_back_to_false(
+    monkeypatch,
+):
+    # A non-boolean hook_persist in the Redis cache is not trusted: the
+    # resolved value must fall back to the default false.
+    payload = json.dumps(
+        {
+            "output_format": "vertical",
+            "add_subtitles": True,
+            "hook_persist": "yes",
+        }
+    )
+    monkeypatch.setattr(
+        "src.services.task_metadata_service.get_redis_client",
+        lambda **_kwargs: _RedisClient(payload),
+    )
+
+    service = TaskService(db=None)
+    settings = await service._load_task_source_settings(_legacy_task_dict())
+
+    assert settings["hook_persist"] is False

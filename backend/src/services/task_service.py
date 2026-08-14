@@ -134,6 +134,7 @@ class TaskService:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        hook_persist: bool = False,
         cleanup_settings: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
@@ -173,6 +174,7 @@ class TaskService:
             processing_mode=processing_mode,
             output_format=output_format,
             add_subtitles=add_subtitles,
+            hook_persist=hook_persist,
             cleanup_settings_json=cleanup_settings,
         )
 
@@ -204,6 +206,7 @@ class TaskService:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        hook_persist: bool = False,
         include_broll: bool = False,
         progress_callback: Optional[Callable] = None,
         should_cancel: Optional[Callable] = None,
@@ -349,6 +352,7 @@ class TaskService:
                     output_format,
                     add_subtitles,
                     normalized_cleanup_settings,
+                    hook_persist=hook_persist,
                 )
                 if clip_info is None:
                     continue  # Skip failed clip
@@ -667,7 +671,9 @@ class TaskService:
             return
 
         broll_dir = Path(runtime_config.temp_dir) / "broll" / task_id
-        orientation = "portrait" if output_format == "vertical" else "landscape"
+        orientation = (
+            "portrait" if output_format in ("vertical", "original") else "landscape"
+        )
         suggestions = await fetch_broll_for_opportunities(
             opportunities, broll_dir, orientation=orientation
         )
@@ -697,6 +703,7 @@ class TaskService:
         cleanup_settings: Optional[Dict[str, Any]] = None,
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        hook_persist: bool = False,
     ) -> Dict[str, Any]:
         """Update task-level settings and optionally regenerate all clips."""
         await self.task_repo.update_task_settings(
@@ -709,6 +716,7 @@ class TaskService:
             include_broll,
             output_format=output_format,
             add_subtitles=add_subtitles,
+            hook_persist=hook_persist,
             cleanup_settings_json=cleanup_settings,
         )
 
@@ -745,6 +753,7 @@ class TaskService:
         metadata = await self._load_task_source_settings(task)
         output_format = metadata.get("output_format", "vertical")
         add_subtitles = metadata.get("add_subtitles", True)
+        hook_persist = metadata.get("hook_persist", False)
         cleanup_payload = cleanup_settings or {
             "cut_long_pauses": metadata.get("cut_long_pauses"),
             "pause_threshold_ms": metadata.get("pause_threshold_ms"),
@@ -835,6 +844,7 @@ class TaskService:
             output_format,
             add_subtitles,
             normalized_cleanup_settings,
+            hook_persist=hook_persist,
         )
 
         await self.clip_repo.delete_clips_by_task(self.db, task_id)

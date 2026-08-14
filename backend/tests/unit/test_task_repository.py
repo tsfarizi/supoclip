@@ -155,6 +155,41 @@ async def test_create_task_persists_caption_template_broll_and_processing_mode(d
         await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
 
 
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_task_round_trip_persists_hook_persist_true(db_session):
+    # hook_persist is a new Schema v3 column flowing create_task -> repository.
+    user_id = await _seed_user(db_session)
+    source_id = await _seed_source(db_session)
+    task_id = await TaskRepository.create_task(
+        db_session,
+        user_id=user_id,
+        source_id=source_id,
+        hook_persist=True,
+    )
+    try:
+        task = await TaskRepository.get_task_by_id(db_session, task_id)
+        assert task["hook_persist"] is True
+    finally:
+        await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_task_defaults_hook_persist_to_false(db_session):
+    # Column contract: hook_persist BOOLEAN NOT NULL DEFAULT false.
+    user_id = await _seed_user(db_session)
+    source_id = await _seed_source(db_session)
+    task_id = await TaskRepository.create_task(
+        db_session,
+        user_id=user_id,
+        source_id=source_id,
+    )
+    try:
+        task = await TaskRepository.get_task_by_id(db_session, task_id)
+        assert task["hook_persist"] is False
+    finally:
+        await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
+
+
 # ---------------------------------------------------------------------------
 # get_task_by_id
 # ---------------------------------------------------------------------------
@@ -354,6 +389,32 @@ async def test_update_task_settings_persists_font_and_caption_options(db_session
             "remove_filler_words": True,
             "filtered_words": ["basically", "like"],
         }
+    finally:
+        await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_update_task_settings_persists_hook_persist_false(db_session):
+    # hook_persist flows through update_task_settings like output_format /
+    # add_subtitles: the column is updated, not just the Redis metadata cache.
+    user_id = await _seed_user(db_session)
+    source_id = await _seed_source(db_session)
+    task_id = await TaskRepository.create_task(
+        db_session, user_id=user_id, source_id=source_id, hook_persist=True
+    )
+    try:
+        await TaskRepository.update_task_settings(
+            db_session,
+            task_id,
+            "Roboto",
+            40,
+            "#112233",
+            "kicker",
+            True,
+            hook_persist=False,
+        )
+        task = await TaskRepository.get_task_by_id(db_session, task_id)
+        assert task["hook_persist"] is False
     finally:
         await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
 

@@ -179,6 +179,7 @@ async def test_update_clip_captions_passes_stored_task_style(monkeypatch, tmp_pa
         "transcript_video_path": tmp_path / "source.mp4",
         "source_ranges": [(10.0, 12.0)],
         "output_format": "vertical",
+        "hook_persist": False,
         "hook_title": None,
         "progress_callback": captured["kwargs"]["progress_callback"],
     }

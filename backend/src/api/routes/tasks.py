@@ -99,6 +99,7 @@ def _merge_task_source_metadata(
     source_type: Any = None,
     output_format: Any = None,
     add_subtitles: Any = None,
+    hook_persist: Any = None,
     cleanup_settings: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     merged = dict(existing or {})
@@ -111,6 +112,8 @@ def _merge_task_source_metadata(
         merged["output_format"] = output_format
     if isinstance(add_subtitles, bool):
         merged["add_subtitles"] = add_subtitles
+    if isinstance(hook_persist, bool):
+        merged["hook_persist"] = hook_persist
     if cleanup_settings:
         merged.update(cleanup_settings)
 
@@ -225,6 +228,9 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     add_subtitles = data.get("add_subtitles", True)
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
+    hook_persist = data.get("hook_persist", False)
+    if not isinstance(hook_persist, bool):
+        hook_persist = False
     cleanup_settings = normalize_clip_cleanup_settings(
         data.get("cut_long_pauses"),
         data.get("pause_threshold_ms"),
@@ -267,6 +273,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             processing_mode=processing_mode,
             output_format=output_format,
             add_subtitles=add_subtitles,
+            hook_persist=hook_persist,
             cleanup_settings=cleanup_settings,
         )
 
@@ -291,6 +298,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             processing_mode,
             output_format,
             add_subtitles,
+            hook_persist=hook_persist,
             include_broll=include_broll,
             cleanup_settings=cleanup_settings,
         )
@@ -305,6 +313,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                 source_type=source_type,
                 output_format=output_format,
                 add_subtitles=add_subtitles,
+                hook_persist=hook_persist,
                 cleanup_settings=cleanup_settings,
             ),
         )
@@ -867,6 +876,11 @@ async def apply_task_settings(
         )
         if not isinstance(add_subtitles, bool):
             add_subtitles = True
+        hook_persist = payload.get(
+            "hook_persist", task_record.get("hook_persist", False)
+        )
+        if not isinstance(hook_persist, bool):
+            hook_persist = False
         task = await task_service.update_task_settings(
             task_id,
             font_family,
@@ -878,6 +892,7 @@ async def apply_task_settings(
             cleanup_settings,
             output_format=output_format,
             add_subtitles=add_subtitles,
+            hook_persist=hook_persist,
         )
         metadata = await _load_task_source_metadata(task_id)
         await _save_task_source_metadata(
@@ -888,6 +903,7 @@ async def apply_task_settings(
                 source_type=metadata.get("source_type") or task_record.get("source_type"),
                 output_format=task.get("output_format"),
                 add_subtitles=task.get("add_subtitles"),
+                hook_persist=task.get("hook_persist"),
                 cleanup_settings=cleanup_settings,
             ),
         )
@@ -1019,6 +1035,9 @@ async def resume_task(
         add_subtitles = task.get("add_subtitles", True)
         if not isinstance(add_subtitles, bool):
             add_subtitles = True
+        hook_persist = task.get("hook_persist", False)
+        if not isinstance(hook_persist, bool):
+            hook_persist = False
         cleanup_settings = None
         cleanup_settings_json = task.get("cleanup_settings_json")
         if cleanup_settings_json is not None:
@@ -1101,6 +1120,7 @@ async def resume_task(
             processing_mode,
             output_format,
             add_subtitles,
+            hook_persist=hook_persist,
             include_broll=bool(task.get("include_broll", False)),
             cleanup_settings=cleanup_settings,
         )

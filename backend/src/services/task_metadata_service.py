@@ -60,16 +60,19 @@ class TaskMetadataService:
         defaults = {
             "output_format": "vertical",
             "add_subtitles": True,
+            "hook_persist": False,
             **normalize_clip_cleanup_settings(),
         }
 
         output_format = task.get("output_format")
         add_subtitles = task.get("add_subtitles")
+        hook_persist = task.get("hook_persist")
         cleanup_settings_json = task.get("cleanup_settings_json")
 
         needs_redis = (
             output_format is None
             or add_subtitles is None
+            or hook_persist is None
             or cleanup_settings_json is None
         )
         payload: Dict[str, Any] = {}
@@ -96,6 +99,16 @@ class TaskMetadataService:
         elif not isinstance(add_subtitles, bool):
             add_subtitles = defaults["add_subtitles"]
 
+        if hook_persist is None:
+            redis_hook_persist = payload.get("hook_persist", defaults["hook_persist"])
+            hook_persist = (
+                redis_hook_persist
+                if isinstance(redis_hook_persist, bool)
+                else defaults["hook_persist"]
+            )
+        elif not isinstance(hook_persist, bool):
+            hook_persist = defaults["hook_persist"]
+
         cleanup_payload: Dict[str, Any] = {}
         if cleanup_settings_json is not None:
             # asyncpg 0.31 decodes the jsonb column to a dict natively, so the
@@ -116,6 +129,7 @@ class TaskMetadataService:
         return {
             "output_format": output_format,
             "add_subtitles": add_subtitles,
+            "hook_persist": hook_persist,
             **normalize_clip_cleanup_settings(
                 cleanup_payload.get("cut_long_pauses"),
                 cleanup_payload.get("pause_threshold_ms"),
