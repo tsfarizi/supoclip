@@ -101,7 +101,9 @@ def _probe_size(path: Path) -> Tuple[Optional[int], Optional[int]]:
         )
         if result.returncode != 0 or "x" not in result.stdout:
             return None, None
-        width_str, height_str = result.stdout.strip().split("x", 1)
+        lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+        last = lines[-1]
+        width_str, height_str = last.split("x", 1)
         return int(width_str), int(height_str)
     except Exception:
         return None, None

@@ -83,8 +83,10 @@ def _ffprobe_size(path: Path) -> tuple[int, int]:
         capture_output=True,
         text=True,
     )
-    width, height = result.stdout.strip().split("x", 1)
-    return int(width), int(height)
+    lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+    last = lines[-1]
+    width_str, height_str = last.split("x", 1)
+    return int(width_str), int(height_str)
 
 
 def _double_bitrate(value: str) -> str:

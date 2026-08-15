@@ -985,8 +985,12 @@ def ffprobe_video_size(video_path: Path) -> Tuple[int, int]:
     )
     if result.returncode != 0 or "x" not in result.stdout:
         raise RuntimeError(f"Unable to read video size for {video_path}")
-    width, height = result.stdout.strip().split("x", 1)
-    return int(width), int(height)
+    lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+    last = lines[-1]
+    if "x" not in last:
+        raise RuntimeError(f"Unable to read video size for {video_path}")
+    width_str, height_str = last.split("x", 1)
+    return int(width_str), int(height_str)
 
 
 def ffprobe_duration(video_path: Path) -> float:

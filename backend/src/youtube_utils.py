@@ -198,7 +198,9 @@ def _get_local_video_dimensions(path: Path) -> tuple[int, int]:
         output = result.stdout.strip()
         if not output or "x" not in output:
             return (0, 0)
-        width_str, height_str = output.split("x", 1)
+        lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+        last = lines[-1]
+        width_str, height_str = last.split("x", 1)
         return (int(width_str), int(height_str))
     except Exception:
         return (0, 0)
