@@ -8,6 +8,7 @@ import pytest
 
 from src.config import Config
 from src.ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
+from src.errors import RenderError
 from src.services import task_service as task_service_module
 from src.services.task_service import TaskService
 from src.workers.tasks import sweep_stale_queued_tasks
@@ -370,6 +371,79 @@ async def test_process_task_keeps_generated_clips_standalone():
         for call in service.clip_repo.create_clip.await_args_list
     ]
     assert saved_paths == ["/tmp/clip-1.mp4", "/tmp/clip-2.mp4"]
+
+
+# ---------------------------------------------------------------------------
+# Falsification: process_task must NOT mark a task "completed" when every
+# clip render fails (0 clips created). Contract: all create_single_clip
+# calls returning None must surface as RenderError so the existing handler
+# persists status "error" (error_code "task_error") with a render/clip
+# failure message. Current code violates this: after the render loop it
+# unconditionally writes "completed" even with an empty clip_ids list.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_task_all_clip_renders_fail_marks_error_not_completed():
+    service = build_task_service()
+    # Every render attempt fails: create_single_clip returns None for each of
+    # the 2 segments, so clip_ids stays empty.
+    service.video_service.create_single_clip = AsyncMock(return_value=None)
+    service.video_service.process_video_complete = AsyncMock(
+        return_value={
+            "clips": [],
+            "segments_to_render": [
+                {"start": 0, "end": 10},
+                {"start": 10, "end": 20},
+            ],
+            "video_path": "/tmp/source.mp4",
+            "segments": [],
+            "summary": None,
+            "key_topics": [],
+            "transcript": "Transcript",
+            "analysis_json": "{}",
+        }
+    )
+    # No notification context: keeps the buggy completion path from reaching
+    # the email service, so the RED failure is exactly the contract breach
+    # (status "completed" with 0 clips), not repository noise.
+    service.task_repo.get_task_notification_context = AsyncMock(return_value=None)
+
+    status_calls = []
+
+    async def record_status(*_args, **_kwargs):
+        status_calls.append(
+            _kwargs.get("status", _args[2] if len(_args) > 2 else None)
+        )
+
+    service.task_repo.update_task_status = AsyncMock(side_effect=record_status)
+
+    # A zero-clip outcome is a render failure: it must raise RenderError so
+    # the handler persists status "error" instead of "completed".
+    with pytest.raises(RenderError):
+        await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
+
+    # (a) "completed" must never be persisted for a task with 0 clips.
+    assert "completed" not in status_calls
+    # (b) The last persisted status is "error" (via the handler), with a
+    # progress_message that names the render/clip failure.
+    assert status_calls[-1] == "error"
+    last_status_call = service.task_repo.update_task_status.await_args_list[-1]
+    last_message = last_status_call.kwargs["progress_message"].lower()
+    assert "render" in last_message or "fail" in last_message
+    # (c) RenderError maps to error_code "task_error" on runtime metadata.
+    error_code_calls = [
+        call.kwargs.get("error_code")
+        for call in service.task_repo.update_task_runtime_metadata.await_args_list
+        if "error_code" in call.kwargs
+    ]
+    assert error_code_calls == ["task_error"]
+    # (d) Zero clips were persisted.
+    service.clip_repo.create_clip.assert_not_awaited()
 
 
 @pytest.mark.asyncio

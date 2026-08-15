@@ -398,6 +398,11 @@ class TaskService:
                 perf_counter() - render_start, 3
             )
 
+            if not clip_ids:
+                raise RenderError(
+                    "Clip rendering failed for all segments; no clips were produced"
+                )
+
             # Mark as completed
             await self.task_repo.update_task_status(
                 self.db,
