@@ -63,7 +63,7 @@ interface FontOption {
 
 type OutputFormat = "vertical" | "vertical_pan" | "vertical_split" | "original" | "auto";
 
-const MAX_VIDEO_UPLOAD_BYTES = 1_000_000_000;
+const MAX_VIDEO_UPLOAD_BYTES = 2_147_483_648;
 
 // Only surface the font search box once the list is long enough to need it.
 const FONT_SEARCH_THRESHOLD = 8;
@@ -137,7 +137,7 @@ async function requestUploadAuthorization(): Promise<UploadAuthorization> {
 
 async function uploadVideoFile(file: File): Promise<string> {
   if (file.size > MAX_VIDEO_UPLOAD_BYTES) {
-    throw new Error("Uploaded file is too large. Please upload a video under 1 GB.");
+    throw new Error("Uploaded file is too large. Please upload a video under 2 GB.");
   }
 
   const uploadAuthorization = await requestUploadAuthorization();
@@ -157,7 +157,7 @@ async function uploadVideoFile(file: File): Promise<string> {
   if (!uploadResponse.ok) {
     const fallbackMessage =
       uploadResponse.status === 413
-        ? "Uploaded file is too large. Please upload a video under 1 GB."
+        ? "Uploaded file is too large. Please upload a video under 2 GB."
         : `Upload error: ${uploadResponse.status}`;
     const uploadError = await parseApiError(uploadResponse, fallbackMessage);
     throw new Error(formatSupportMessage(uploadError));
@@ -183,7 +183,7 @@ async function uploadVideoFileViaProxy(file: File): Promise<string> {
   if (!uploadResponse.ok) {
     const fallbackMessage =
       uploadResponse.status === 413
-        ? "Uploaded file is too large. Please upload a video under 1 GB."
+        ? "Uploaded file is too large. Please upload a video under 2 GB."
         : `Upload error: ${uploadResponse.status}`;
     const uploadError = await parseApiError(uploadResponse, fallbackMessage);
     throw new Error(formatSupportMessage(uploadError));
@@ -1022,7 +1022,7 @@ export default function HomeApp() {
                     ) : (
                       <>
                         <p className="text-sm font-medium text-stone-700">Drop a video file here or click to browse</p>
-                        <p className="text-xs text-stone-400 mt-1">MP4, MOV, AVI up to 500MB</p>
+                        <p className="text-xs text-stone-400 mt-1">MP4, MOV, AVI up to 2GB</p>
                       </>
                     )}
                   </div>
