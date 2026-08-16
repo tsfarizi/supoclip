@@ -33,6 +33,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
+def build_clip_download_filename(clip: Dict[str, Any], suffix: str = "") -> str:
+    hook_title = clip.get("hook_title")
+    fallback_title = f"Clip {clip.get('clip_order', 0)}"
+    title = hook_title if isinstance(hook_title, str) and hook_title.strip() else fallback_title
+
+    title = re.sub(r"\s+", " ", title)
+    title = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", title)
+    title = re.sub(r'[<>:"/\\|?*]', "", title)
+    title = re.sub(r"\.{2,}", ".", title).strip().rstrip(". ")
+    if not title:
+        title = fallback_title
+
+    safe_suffix = re.sub(r"\s+", " ", suffix)
+    safe_suffix = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", safe_suffix)
+    safe_suffix = re.sub(r'[<>:"/\\|?*]', "", safe_suffix)
+    safe_suffix = re.sub(r"\.{2,}", ".", safe_suffix).rstrip(". ")
+
+    return f"{title}{safe_suffix}.mp4"
+
+
 def _normalize_font_size(value: Any, default: int = 24) -> Optional[int]:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
@@ -426,7 +446,7 @@ async def get_shared_clip_file(
     return FileResponse(
         path=str(clip_path),
         media_type="video/mp4",
-        filename=clip["filename"],
+        filename=build_clip_download_filename(clip),
         content_disposition_type="inline",
         headers={"Cache-Control": "private, no-store"},
     )
@@ -694,7 +714,7 @@ async def get_clip_file(
         return FileResponse(
             path=str(clip_path),
             media_type="video/mp4",
-            filename=clip["filename"],
+            filename=build_clip_download_filename(clip),
             content_disposition_type="inline",
             headers={"Cache-Control": "private, no-store"},
         )
@@ -981,7 +1001,7 @@ async def export_clip(
             preset_name,
         )
 
-        download_name = f"{Path(clip['filename']).stem}_{preset_name}.mp4"
+        download_name = build_clip_download_filename(clip, f"_{preset_name}")
         return FileResponse(
             path=str(output_path), media_type="video/mp4", filename=download_name
         )

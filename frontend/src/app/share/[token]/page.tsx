@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
+import { buildClipDownloadFilename } from "@/lib/clip-download";
 
 interface SharedClip {
   id: string;
@@ -167,7 +168,10 @@ export default function SharedGenerationPage() {
 
                     <div className="mt-auto pt-5">
                       <Button asChild variant="outline">
-                        <a href={getClipUrl(clip.id)} download={clip.filename}>
+                        <a
+                          href={getClipUrl(clip.id)}
+                          download={buildClipDownloadFilename(clip.hook_title, clip.clip_order)}
+                        >
                           <Download className="h-4 w-4" />
                           Download clip
                         </a>

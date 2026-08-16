@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/sheet";
 import { useSession } from "@/lib/auth-client";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
+import { buildClipDownloadFilename } from "@/lib/clip-download";
 import { buildFontOptionsPayload, FONT_SIZE_OPTIONS, FONT_TEMPLATE_DEFAULT_VALUE } from "@/lib/font-options";
 import {
   ArrowLeft,
@@ -624,10 +625,10 @@ export default function TaskPage() {
     }
   };
 
-  const handleExportClip = async (clipId: string, fallbackFilename: string) => {
+  const handleExportClip = async (clip: Clip) => {
     if (!session?.user?.id || !task?.id) return;
 
-    const response = await fetch(`${taskApiUrl}/${task.id}/clips/${clipId}/export?preset=${exportPreset}`, {
+    const response = await fetch(`${taskApiUrl}/${task.id}/clips/${clip.id}/export?preset=${exportPreset}`, {
       cache: "no-store",
     });
 
@@ -640,7 +641,7 @@ export default function TaskPage() {
     const blobUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = blobUrl;
-    link.download = `${fallbackFilename.replace(/\.mp4$/i, "")}_${exportPreset}.mp4`;
+    link.download = buildClipDownloadFilename(clip.hook_title, clip.clip_order, `_${exportPreset}`);
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -651,13 +652,13 @@ export default function TaskPage() {
     if (exportPreset === "original") {
       const link = document.createElement("a");
       link.href = getClipUrl(clip.video_url);
-      link.download = clip.filename;
+      link.download = buildClipDownloadFilename(clip.hook_title, clip.clip_order);
       document.body.appendChild(link);
       link.click();
       link.remove();
       return;
     }
-    void handleExportClip(clip.id, clip.filename);
+    void handleExportClip(clip);
   };
 
   const handleCopyShareLink = async () => {
@@ -1020,7 +1021,10 @@ export default function TaskPage() {
                             <TranscriptPreview text={clip.text} clipTitle={`Clip ${clip.clip_order}`} />
                           )}
                           <Button size="sm" variant="outline" asChild>
-                            <a href={getClipUrl(clip.video_url)} download={clip.filename}>
+                            <a
+                              href={getClipUrl(clip.video_url)}
+                              download={buildClipDownloadFilename(clip.hook_title, clip.clip_order)}
+                            >
                               <Download className="w-4 h-4" />
                               Download
                             </a>

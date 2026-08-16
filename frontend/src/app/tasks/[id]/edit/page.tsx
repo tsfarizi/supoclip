@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useSession } from "@/lib/auth-client";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
+import { buildClipDownloadFilename } from "@/lib/clip-download";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +49,7 @@ interface Clip {
   end_time: string;
   text: string;
   video_url: string;
+  hook_title: string | null;
 }
 
 interface VideoFx {
@@ -543,7 +545,11 @@ export default function TaskEditPage() {
       const blobUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = blobUrl;
-      link.download = `${selectedClip.filename.replace(/\.mp4$/i, "")}_${exportPreset}_browser.mp4`;
+      link.download = buildClipDownloadFilename(
+        selectedClip.hook_title,
+        selectedClip.clip_order,
+        `_${exportPreset}_browser`,
+      );
       document.body.appendChild(link);
       link.click();
       link.remove();
