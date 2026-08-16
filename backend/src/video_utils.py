@@ -54,6 +54,9 @@ SENTENCE_END_RE = re.compile(r"""[.!?]["')\]}]*$""")
 HOOK_TITLE_SECONDS = 4.0
 HOOK_TITLE_MIN_SECONDS = 1.5
 HOOK_TITLE_TOP_MARGIN_FRAC = 0.07
+# Extra vertical offset (px) that pushes the burned-in @watermark BELOW the
+# hook title band so the two top-band elements never overlap.
+WATERMARK_V_OFFSET = 90
 
 
 class VideoProcessor:
@@ -1796,6 +1799,75 @@ def build_hook_title_ass(
     return style_line, events
 
 
+def build_watermark_ass(
+    watermark: str,
+    template: Dict[str, Any],
+    video_width: int,
+    video_height: int,
+    output_duration: float,
+    font_name: str,
+    caption_font_px: int,
+    *,
+    hook_margin_v: int,
+    watermark_persist: bool = False,
+    watermark_margin_v_override: Optional[float] = None,
+) -> Tuple[str, List[str]]:
+    """Build the (style_line, dialogue_events) for a burned-in @watermark.
+
+    Mirrors the hook-title pattern: a single line in the top safe area
+    (Alignment 8) styled off the caption template, positioned BELOW the hook by
+    ``WATERMARK_V_OFFSET``. The text is auto-prefixed with ``@`` and a
+    user-supplied leading ``@``/whitespace is normalized away.
+    """
+    raw = watermark.strip().lstrip("@").strip()
+    if not raw:
+        return "", []
+    display = "@" + raw
+
+    primary = hex_to_ass_color(template.get("font_color"), "#FFFFFF")
+    outline = hex_to_ass_color(template.get("stroke_color") or "#000000", "#000000")
+    back_color = hex_to_ass_color(template.get("background_color"), "#00000080")
+
+    # Smaller than the hook so the headline stays the dominant top-band text.
+    base_px = max(22, min(48, int(caption_font_px * 0.62)))
+    base_stroke = int(template.get("stroke_width", 3) or 0)
+    has_outline = template.get("stroke_color") is not None and base_stroke > 0
+    border_style = 3 if (not has_outline and template.get("background_color")) else 1
+    outline_px = (
+        max(base_stroke, round(base_px * base_stroke / 26)) if has_outline else 0
+    )
+    if border_style == 3:
+        outline_px = max(4, base_px // 6)  # backing-box padding
+    elif outline_px == 0:
+        outline_px = max(2, base_px // 16)  # always keep contrast on video
+    shadow_px = max(2, base_px // 20) if template.get("shadow") else 0
+    margin_v = (
+        int(watermark_margin_v_override)
+        if watermark_margin_v_override is not None
+        else hook_margin_v + WATERMARK_V_OFFSET
+    )
+
+    style_line = (
+        f"Style: Watermark,{font_name},{base_px},{primary},&H000000FF,{outline},{back_color},"
+        f"1,0,0,0,100,100,0,0,{border_style},{outline_px},{shadow_px},8,60,60,{margin_v},1"
+    )
+
+    start = 0.12
+    if watermark_persist:
+        # Contract: a persisted watermark stays on screen for the WHOLE clip.
+        end = output_duration
+    else:
+        end = min(HOOK_TITLE_SECONDS, max(HOOK_TITLE_MIN_SECONDS, output_duration - 0.25))
+    if output_duration <= HOOK_TITLE_MIN_SECONDS:
+        start = 0.0
+    entrance = "\\fad(160,240)"
+    text = f"{{{entrance}}}{escape_ass_text(display)}"
+    events = [
+        f"Dialogue: 1,{ass_timestamp(start)},{ass_timestamp(end)},Watermark,,0,0,{margin_v},,{text}"
+    ]
+    return style_line, events
+
+
 def build_assemblyai_ass_subtitles(
     video_path: Path,
     clip_start: float,
@@ -1816,6 +1888,9 @@ def build_assemblyai_ass_subtitles(
     highlight_words: Optional[List[str]] = None,
     hook_persist: bool = False,
     hook_margin_v_override: Optional[float] = None,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
+    watermark_margin_v_override: Optional[float] = None,
 ) -> bool:
     """Generate animated word-synced ASS subtitles from cached AssemblyAI words.
 
@@ -1846,10 +1921,14 @@ def build_assemblyai_ass_subtitles(
         else:
             relevant_words = get_words_in_range(transcript_data, clip_start, clip_end)
     if include_captions and not relevant_words:
-        suffix = "rendering hook title only" if hook_title else "no captions will be rendered"
+        suffix = (
+            "rendering hook title/watermark only"
+            if (hook_title or watermark)
+            else "no captions will be rendered"
+        )
         logger.warning(f"captions requested but no word data; {suffix}")
-    if not relevant_words and not hook_title:
-        logger.warning("No words or hook title available for ASS subtitles")
+    if not relevant_words and not hook_title and not watermark:
+        logger.warning("No words, hook title, or watermark available for ASS subtitles")
         return False
 
     # --- styling knobs (new template fields, all optional) ---
@@ -1922,6 +2001,36 @@ def build_assemblyai_ass_subtitles(
         )
         hook_style_block = f"{hook_style_line}\n"
 
+    watermark_style_block = ""
+    watermark_events: List[str] = []
+    if watermark:
+        if keep_ranges:
+            ranges = normalize_source_ranges(keep_ranges)
+            fade = crossfade_fade_for_ranges(ranges)
+            watermark_output_duration = sum(
+                end - start for start, end in ranges
+            ) - fade * max(0, len(ranges) - 1)
+        else:
+            watermark_output_duration = max(0.0, clip_end - clip_start)
+        hook_margin = (
+            hook_margin_v_override
+            if hook_margin_v_override is not None
+            else max(48, int(video_height * HOOK_TITLE_TOP_MARGIN_FRAC))
+        )
+        watermark_style_line, watermark_events = build_watermark_ass(
+            watermark,
+            template,
+            video_width,
+            video_height,
+            watermark_output_duration,
+            font_name,
+            font_px,
+            hook_margin_v=hook_margin,
+            watermark_persist=watermark_persist,
+            watermark_margin_v_override=watermark_margin_v_override,
+        )
+        watermark_style_block = f"{watermark_style_line}\n"
+
     # Contextual emoji + emphasis annotations over the whole clip word list.
     emoji_by_idx, emphasis_idx = annotate_caption_words(
         relevant_words,
@@ -1953,8 +2062,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{font_name},{font_px},{primary},&H000000FF,{outline},{back_color},1,0,0,0,100,100,0,0,{border_style},{outline_px},{shadow_px},5,60,60,60,1
-{hook_style_block}
-[Events]
+{hook_style_block}{watermark_style_block}[Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
@@ -2058,13 +2166,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},Default,,0,0,0,,{line_prefix}{effect}{chunk_text}"
             )
 
-    all_events = hook_events + events
+    all_events = hook_events + watermark_events + events
     output_ass_path.write_text(header + "\n".join(all_events) + "\n", encoding="utf-8")
     logger.info(
-        "Wrote ASS subtitles: %s (%d events%s)",
+        "Wrote ASS subtitles: %s (%d events%s%s)",
         output_ass_path,
         len(all_events),
         ", hook title" if hook_events else "",
+        ", watermark" if watermark_events else "",
     )
     return True
 
@@ -4174,6 +4283,8 @@ def create_optimized_clip(
     keep_ranges: Optional[List[Tuple[float, float]]] = None,
     hook_title: Optional[str] = None,
     hook_persist: bool = False,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
 ) -> bool:
     """Create clip with optional subtitles. output_format: 'vertical' (9:16),
     'original' (1080x1920 white-canvas fit) or 'auto'."""
@@ -4286,10 +4397,18 @@ def create_optimized_clip(
                     position_y_override = (1920 - bottom_white * 0.5) / 1920
                 if top_white >= 200:
                     hook_margin_v_override = int(top_white * 0.5)
+            # The watermark always sits WATERMARK_V_OFFSET below the hook band;
+            # when the hook was lowered onto the white canvas the watermark
+            # follows by the same offset.
+            watermark_margin_v_override = (
+                hook_margin_v_override + WATERMARK_V_OFFSET
+                if hook_margin_v_override is not None
+                else None
+            )
 
             burn_ass_path: Optional[Path] = None
             fonts_dir: Optional[Path] = None
-            if (add_subtitles or hook_title) and build_assemblyai_ass_subtitles(
+            if (add_subtitles or hook_title or watermark) and build_assemblyai_ass_subtitles(
                 video_path,
                 start_time,
                 end_time,
@@ -4306,6 +4425,9 @@ def create_optimized_clip(
                 position_y_override=position_y_override,
                 hook_margin_v_override=hook_margin_v_override,
                 hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
+                watermark_margin_v_override=watermark_margin_v_override,
             ):
                 burn_ass_path = ass_path
                 fonts_dir = ass_fonts_dir(
@@ -4343,6 +4465,8 @@ def create_clips_from_segments(
     add_subtitles: bool = True,
     cleanup_settings: Optional[Dict[str, Any]] = None,
     hook_persist: bool = False,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
 ) -> List[Dict[str, Any]]:
     """Create optimized video clips from segments with template support."""
     logger.info(
@@ -4418,6 +4542,8 @@ def create_clips_from_segments(
                 keep_ranges,
                 hook_title=segment.get("hook_title"),
                 hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
             )
 
             if success:
@@ -4579,6 +4705,8 @@ def create_clips_with_transitions(
     add_subtitles: bool = True,
     cleanup_settings: Optional[Dict[str, Any]] = None,
     hook_persist: bool = False,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
 ) -> List[Dict[str, Any]]:
     """Create standalone video clips without inter-clip transitions.
 
@@ -4602,6 +4730,8 @@ def create_clips_with_transitions(
         add_subtitles,
         cleanup_settings,
         hook_persist,
+        watermark=watermark,
+        watermark_persist=watermark_persist,
     )
 
 
