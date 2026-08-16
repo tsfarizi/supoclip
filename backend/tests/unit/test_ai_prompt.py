@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from pydantic_ai.models.ollama import OllamaModel
 
 from src.ai import (
@@ -7,6 +8,7 @@ from src.ai import (
     IDEAL_CLIP_MIN_SECONDS,
     MIN_ACCEPTED_CLIP_SECONDS,
     TranscriptSegment,
+    HookSelection,
     _build_transcript_model,
     _choose_repaired_bounds,
     _extract_transcript_text,
@@ -14,6 +16,7 @@ from src.ai import (
     _get_missing_llm_key_error,
     _parse_transcript_spans,
     _parse_transcript_timestamp_seconds,
+    _validate_or_repair_hook_selection,
     build_transcript_analysis_prompt,
     transcript_analysis_system_prompt,
 )
@@ -40,6 +43,70 @@ def test_system_prompt_enforces_grounding_rules():
     assert "Do not use \"segment\" as an output field. Use \"text\"." in (
         transcript_analysis_system_prompt
     )
+    assert '"hook_selection"' in transcript_analysis_system_prompt
+    assert "1-5 seconds inclusive" in transcript_analysis_system_prompt
+
+
+def test_hook_selection_schema_requires_source_range_evidence_and_score_bounds():
+    hook = HookSelection(
+        hook_start_time="00:10",
+        hook_end_time="00:11",
+        transcript_evidence="A source line",
+        reasoning="It creates curiosity",
+        hook_score=25,
+    )
+
+    assert hook.hook_score == 25
+
+
+def test_hook_selection_schema_rejects_score_outside_contract():
+    with pytest.raises(ValueError):
+        HookSelection(
+            hook_start_time="00:10",
+            hook_end_time="00:11",
+            transcript_evidence="A source line",
+            reasoning="reason",
+            hook_score=26,
+        )
+
+
+def test_invalid_one_second_boundary_hooks_are_repaired_from_transcript():
+    segment = TranscriptSegment(
+        start_time="00:20",
+        end_time="00:40",
+        text="Main segment",
+        hook_selection=HookSelection(
+            hook_start_time="00:10",
+            hook_end_time="00:16",
+            transcript_evidence="invented",
+            reasoning="bad duration",
+            hook_score=7,
+        ),
+    )
+    spans = _parse_transcript_spans("[00:14 - 00:19] Grounded setup\n[00:20 - 00:40] Main")
+
+    repaired = _validate_or_repair_hook_selection(segment, spans, 20)
+
+    assert repaired is not None
+    assert repaired.hook_start_time == "00:14"
+    assert repaired.hook_end_time == "00:19"
+    assert repaired.transcript_evidence == "Grounded setup"
+
+
+def test_valid_five_second_hook_is_clamped_to_transcript_evidence():
+    segment = TranscriptSegment(
+        start_time="00:20", end_time="00:40", text="Main",
+        hook_selection=HookSelection(
+            hook_start_time="00:15", hook_end_time="00:20",
+            transcript_evidence="wrong", reasoning="reason", hook_score=3,
+        ),
+    )
+    spans = _parse_transcript_spans("[00:15 - 00:20] Exact setup\n[00:20 - 00:40] Main")
+
+    validated = _validate_or_repair_hook_selection(segment, spans, 20)
+
+    assert validated is not None
+    assert validated.transcript_evidence == "Exact setup"
 
 
 def test_build_transcript_analysis_prompt_requires_transcript_fidelity():

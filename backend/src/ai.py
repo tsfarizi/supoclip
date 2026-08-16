@@ -24,7 +24,7 @@ IDEAL_CLIP_MIN_SECONDS = 25
 IDEAL_CLIP_MAX_SECONDS = 50
 MIN_ACCEPTED_CLIP_SECONDS = 15
 MAX_ACCEPTED_CLIP_SECONDS = 60
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "hook-titles-v4"
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "hook-selection-v5"
 HOOK_TITLE_MAX_CHARS = 64
 HOOK_TITLE_MAX_WORDS = 10
 TRANSCRIPT_SPAN_RE = re.compile(
@@ -82,6 +82,20 @@ def _default_virality_analysis() -> ViralityAnalysis:
     return ViralityAnalysis()
 
 
+class HookSelection(BaseModel):
+    """A source-video moment that must precede the selected main segment."""
+
+    hook_start_time: str = Field(description="Source-video hook start in MM:SS format")
+    hook_end_time: str = Field(description="Source-video hook end in MM:SS format")
+    transcript_evidence: str = Field(
+        description="Verbatim or near-verbatim transcript evidence for the hook"
+    )
+    reasoning: str = Field(description="Why this source-video moment is a strong hook")
+    hook_score: int = Field(
+        description="Hook strength score from 0 to 25", ge=0, le=25
+    )
+
+
 class TranscriptSegment(BaseModel):
     """Represents a relevant segment of transcript with precise timing and virality analysis."""
 
@@ -108,6 +122,13 @@ class TranscriptSegment(BaseModel):
     virality: ViralityAnalysis = Field(
         default_factory=_default_virality_analysis,
         description="Detailed virality score breakdown",
+    )
+    hook_selection: Optional[HookSelection] = Field(
+        default=None,
+        description=(
+            "Mandatory source-video hook placed before this main segment. "
+            "Must be 1-5 seconds, transcript-grounded, and scored."
+        ),
     )
     hook_title: Optional[str] = Field(
         default=None,
@@ -187,7 +208,10 @@ OUTPUT CONTRACT:
 - Return valid JSON only. Do not output Markdown, headings, bullets, prose, code fences, explanations, or commentary outside the JSON object.
 - The top-level JSON object must include: "most_relevant_segments", "summary", and "key_topics".
 - Only include "broll_opportunities" when B-roll was requested.
-- Each item in "most_relevant_segments" must include: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", and "hook_title".
+- Each item in "most_relevant_segments" must include: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", "hook_selection", and "hook_title".
+- "hook_selection" is mandatory and more important than "hook_title": choose a source-video moment before the main segment, not a written headline.
+- "hook_selection" must include "hook_start_time", "hook_end_time", "transcript_evidence", "reasoning", and "hook_score".
+- The hook duration must be 1-5 seconds inclusive and must end at or before the main segment start.
 - Do not use "segment" as an output field. Use "text".
 - "virality" must include: "hook_score", "engagement_score", "value_score", "shareability_score", "total_score", "hook_type", and "virality_reasoning".
 - Every returned segment must be 15-60 seconds long. Prefer 25-50 seconds.
@@ -265,6 +289,12 @@ HOOK TITLES ("hook_title" per segment):
 - Do not simply repeat the first spoken words verbatim; reframe them as a headline
 - Plain text only: no hashtags, no emojis, no quotes around the title
 - Good examples: "The $40k mistake I keep seeing", "Why nobody tells you this about VC", "Do this before your next interview"
+
+SOURCE-VIDEO HOOK SELECTION ("hook_selection" per segment):
+- Selecting a source-video hook is mandatory and more important than writing "hook_title".
+- Select the strongest contiguous 1-5 second moment immediately before the main segment.
+- Use only source transcript timestamps and provide transcript evidence, factual reasoning, and a 0-25 hook_score.
+- Never substitute a headline, paraphrase, or invented setup for the source-video hook.
 
 HOOK TYPES to identify:
 - "question": Opens with a question that creates curiosity
@@ -488,7 +518,9 @@ JSON-only output requirements:
 - Return one valid JSON object and nothing else.
 - No Markdown, headings, bullets, code fences, or explanatory text outside JSON.
 - Top-level keys: "most_relevant_segments", "summary", "key_topics"{', "broll_opportunities"' if include_broll else ''}.
-- Segment keys: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", "hook_title".
+- Segment keys: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", "hook_selection", "hook_title".
+- "hook_selection" is mandatory and more important than "hook_title". It must contain "hook_start_time", "hook_end_time", "transcript_evidence", "reasoning", and "hook_score".
+- The hook must be a source-video moment before the main segment, 1-5 seconds inclusive, and grounded in the supplied transcript.
 - "hook_title" is a 3-9 word plain-text headline for the clip, grounded in the segment (no hashtags, emojis, or quotes).
 - Virality keys: "hook_score", "engagement_score", "value_score", "shareability_score", "total_score", "hook_type", "virality_reasoning".
 - Do not return segments shorter than {MIN_ACCEPTED_CLIP_SECONDS} seconds or longer than {MAX_ACCEPTED_CLIP_SECONDS} seconds.
@@ -586,6 +618,94 @@ def _extract_transcript_text(
         and span["start"] < end_seconds
     ]
     return " ".join(selected_text).strip()
+
+
+def _repair_hook_selection(
+    segment: TranscriptSegment,
+    transcript_spans: list[dict[str, Any]],
+    main_start_seconds: int,
+) -> HookSelection | None:
+    """Build the nearest transcript-grounded hook when the model hook is unusable."""
+    if main_start_seconds <= 0 or not transcript_spans:
+        return None
+
+    candidate_ends = sorted(
+        {
+            min(main_start_seconds, int(span["end"]))
+            for span in transcript_spans
+            if int(span["start"]) < main_start_seconds
+        },
+        reverse=True,
+    )
+    for hook_end_seconds in candidate_ends:
+        hook_start_seconds = max(0, hook_end_seconds - 5)
+        if hook_end_seconds - hook_start_seconds < 1:
+            continue
+        evidence = _extract_transcript_text(
+            transcript_spans, hook_start_seconds, hook_end_seconds
+        )
+        if not evidence:
+            continue
+        return HookSelection(
+            hook_start_time=_format_transcript_timestamp(hook_start_seconds),
+            hook_end_time=_format_transcript_timestamp(hook_end_seconds),
+            transcript_evidence=evidence,
+            reasoning="Selected from the nearest transcript-grounded source-video moment before the main segment.",
+            hook_score=segment.virality.hook_score,
+        )
+    return None
+
+
+def _validate_or_repair_hook_selection(
+    segment: TranscriptSegment,
+    transcript_spans: list[dict[str, Any]],
+    main_start_seconds: int,
+) -> HookSelection | None:
+    """Validate the mandatory hook or deterministically repair it from transcript spans."""
+    hook = segment.hook_selection
+    if hook is not None:
+        try:
+            hook_start_seconds = _parse_transcript_timestamp_seconds(
+                hook.hook_start_time
+            )
+            hook_end_seconds = _parse_transcript_timestamp_seconds(hook.hook_end_time)
+            hook_duration = hook_end_seconds - hook_start_seconds
+            evidence = _extract_transcript_text(
+                transcript_spans, hook_start_seconds, hook_end_seconds
+            )
+            if (
+                1 <= hook_duration <= 5
+                and 0 <= hook_start_seconds < hook_end_seconds <= main_start_seconds
+                and evidence
+            ):
+                hook.hook_start_time = _format_transcript_timestamp(hook_start_seconds)
+                hook.hook_end_time = _format_transcript_timestamp(hook_end_seconds)
+                hook.transcript_evidence = evidence
+                if not hook.reasoning.strip():
+                    hook.reasoning = (
+                        "The source-video moment immediately precedes the main segment "
+                        "and is grounded in the transcript evidence."
+                    )
+                return hook
+        except (ValueError, IndexError):
+            pass
+
+    repaired_hook = _repair_hook_selection(
+        segment, transcript_spans, main_start_seconds
+    )
+    if hook is not None:
+        logger.warning(
+            "Repairing invalid hook selection for segment %s-%s",
+            segment.start_time,
+            segment.end_time,
+        )
+    else:
+        logger.warning(
+            "Repairing missing hook selection for segment %s-%s",
+            segment.start_time,
+            segment.end_time,
+        )
+    return repaired_hook
 
 
 def _choose_repaired_bounds(
@@ -771,6 +891,19 @@ async def get_most_relevant_parts_by_transcript(
                 if duration > MAX_ACCEPTED_CLIP_SECONDS:
                     logger.warning(
                         f"Skipping segment too long: {duration}s (max {MAX_ACCEPTED_CLIP_SECONDS}s allowed)"
+                    )
+                    continue
+
+                segment.hook_selection = _validate_or_repair_hook_selection(
+                    segment,
+                    transcript_spans,
+                    start_seconds,
+                )
+                if segment.hook_selection is None:
+                    logger.warning(
+                        "Skipping segment without a repairable source-video hook: %s-%s",
+                        segment.start_time,
+                        segment.end_time,
                     )
                     continue
 

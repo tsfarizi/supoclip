@@ -60,6 +60,7 @@ import Link from "next/link";
 import DynamicVideoPlayer from "@/components/dynamic-video-player";
 import { TranscriptPreview } from "@/components/transcript-preview";
 import { FontSelectOption, type FontOption } from "@/components/font-select-option";
+import { getHookTypeLabel, type MergeClipsPayload } from "@/lib/task-types";
 
 interface Clip {
   id: string;
@@ -80,8 +81,8 @@ interface Clip {
   engagement_score: number;
   value_score: number;
   shareability_score: number;
-  hook_type: string | null;
-  hook_title: string | null;
+  hook_type?: string | null;
+  hook_title?: string | null;
 }
 
 interface TaskDetails {
@@ -396,18 +397,6 @@ export default function TaskPage() {
     return "bg-red-500";
   };
 
-  const getHookTypeLabel = (hookType: string | null) => {
-    const labels: Record<string, string> = {
-      question: "Question Hook",
-      statement: "Bold Statement",
-      statistic: "Data/Stats",
-      story: "Story Hook",
-      contrast: "Contrast Hook",
-      none: "No Hook",
-    };
-    return labels[hookType || "none"] || hookType || "None";
-  };
-
   const handleEditTitle = async () => {
     if (!editedTitle.trim() || !session?.user?.id || !params.id) return;
 
@@ -526,7 +515,7 @@ export default function TaskPage() {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ clip_ids: selectedClipIds }),
+      body: JSON.stringify({ clip_ids: selectedClipIds } satisfies MergeClipsPayload),
     });
     if (!response.ok) {
       alert(await buildSupportError(response, "Failed to merge clips"));

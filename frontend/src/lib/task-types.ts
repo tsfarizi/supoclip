@@ -24,6 +24,13 @@ export interface Clip {
   hook_title?: string | null;
 }
 
+// Existing merge endpoint contract. Hook metadata is returned by the backend;
+// clients do not provide hook-generation options.
+export interface MergeClipsPayload {
+  clip_ids: string[];
+  transition?: string | null;
+}
+
 export interface TaskDetails {
   id: string;
   user_id?: string;

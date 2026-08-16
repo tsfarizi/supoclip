@@ -1,10 +1,12 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from src.services import video_service as video_service_module
 from src.services.video_service import VideoService
+from src.clip_source_map import load_clip_source_manifest
 
 
 class _EmptyAnalysis:
@@ -99,3 +101,67 @@ def test_fallback_segment_caps_to_video_duration():
     assert segment["start_time"] == "00:00"
     assert segment["end_time"] == "00:12"
     assert segment["hook_type"] == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_create_single_clip_composes_hook_before_main_and_persists_roles(
+    monkeypatch, tmp_path
+):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    config = SimpleNamespace(temp_dir=str(tmp_path))
+    monkeypatch.setattr(video_service_module, "get_config", lambda: config)
+    monkeypatch.setattr(
+        video_service_module,
+        "build_clip_keep_ranges",
+        lambda *_args, **_kwargs: [(20.0, 25.0)],
+    )
+    monkeypatch.setattr(
+        video_service_module,
+        "extend_keep_ranges_to_sentence_boundary",
+        lambda _path, ranges, **_kwargs: ranges,
+    )
+    captured = {}
+
+    def fake_compose(video_path, hook_range, main_ranges, output_path, **kwargs):
+        captured["video_path"] = video_path
+        captured["hook_range"] = hook_range
+        captured["main_ranges"] = main_ranges
+        Path(output_path).write_bytes(b"rendered")
+        return Path(output_path)
+
+    async def fake_run_in_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(video_service_module, "compose_hook_and_main", fake_compose)
+    monkeypatch.setattr(video_service_module, "run_in_thread", fake_run_in_thread)
+    monkeypatch.setattr(
+        video_service_module,
+        "apply_broll_suggestions_to_clip",
+        lambda *_args, **_kwargs: None,
+    )
+
+    clip = await VideoService.create_single_clip(
+        source,
+        {
+            "start_time": "00:20",
+            "end_time": "00:25",
+            "text": "main",
+            "hook_selection": {
+                "hook_start_time": "00:15",
+                "hook_end_time": "00:20",
+                "transcript_evidence": "setup",
+                "reasoning": "curiosity",
+                "hook_score": 10,
+            },
+        },
+        0,
+        tmp_path,
+    )
+
+    assert clip is not None
+    assert captured["hook_range"] == (15.0, 20.0)
+    assert captured["main_ranges"] == [(20.0, 25.0)]
+    manifest = load_clip_source_manifest(Path(clip["path"]))
+    assert manifest["hook_range"] == (15.0, 20.0)
+    assert manifest["main_ranges"] == [(20.0, 25.0)]

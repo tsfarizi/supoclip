@@ -32,8 +32,10 @@ from ..video_utils import (
 )
 from ..clip_source_map import (
     normalize_source_ranges,
+    save_clip_source_manifest,
     save_clip_source_ranges,
 )
+from ..transition_engine import compose_hook_and_main
 from ..ai import get_most_relevant_parts_by_transcript
 from ..config import get_config
 from ..errors import CancelledError, DownloadError, InvalidSourceError
@@ -61,6 +63,83 @@ class VideoService:
             return float(result.stdout.strip())
         except Exception:
             return None
+
+    @staticmethod
+    def _hook_range(segment: Dict[str, Any], main_start: float) -> tuple[float, float] | None:
+        selection = segment.get("hook_selection")
+        if hasattr(selection, "model_dump"):
+            selection = selection.model_dump()
+        if not isinstance(selection, dict):
+            return None
+        try:
+            start = parse_timestamp_to_seconds(str(selection["hook_start_time"]))
+            end = parse_timestamp_to_seconds(str(selection["hook_end_time"]))
+        except (KeyError, TypeError, ValueError, IndexError):
+            return None
+        if not (1.0 <= end - start <= 5.0 and 0 <= start < end <= main_start):
+            return None
+        return start, end
+
+    @staticmethod
+    def _deterministic_fallback_hook(
+        segment: Dict[str, Any],
+        main_start: float,
+        main_ranges: List[tuple[float, float]],
+    ) -> tuple[tuple[float, float], List[tuple[float, float]]] | None:
+        """Derive a source-backed hook for manifests created before hook selection."""
+        available_ranges = normalize_source_ranges(
+            segment.get("source_ranges") or main_ranges
+        )
+        for range_start, range_end in reversed(available_ranges):
+            hook_end = min(main_start, range_end)
+            hook_start = max(range_start, hook_end - 5.0)
+            if 1.0 <= hook_end - hook_start <= 5.0 and hook_start < hook_end:
+                return (hook_start, hook_end), main_ranges
+
+        if not main_ranges:
+            return None
+        range_start, range_end = main_ranges[0]
+        hook_end = min(range_end, range_start + 5.0)
+        if hook_end - range_start < 1.0:
+            return None
+
+        # A clip beginning at source time zero has no earlier source frame. Use
+        # its leading source range as the deterministic hook and remove that
+        # prefix from the main ranges so the compositor still has hook -> main
+        # ordering rather than rendering the same frames twice.
+        hook = (range_start, hook_end)
+        remaining: List[tuple[float, float]] = []
+        for start, end in main_ranges:
+            if end <= hook_end:
+                continue
+            remaining.append((max(start, hook_end), end))
+        return hook, normalize_source_ranges(remaining)
+
+    @staticmethod
+    def _resolve_hook(
+        segment: Dict[str, Any],
+        main_start: float,
+        main_ranges: List[tuple[float, float]],
+    ) -> tuple[tuple[float, float], List[tuple[float, float]]] | None:
+        hook_range = VideoService._hook_range(segment, main_start)
+        if hook_range is not None:
+            return hook_range, main_ranges
+
+        fallback = VideoService._deterministic_fallback_hook(
+            segment, main_start, main_ranges
+        )
+        if fallback is None:
+            return None
+        hook_range, resolved_main_ranges = fallback
+        segment["hook_selection"] = {
+            "hook_start_time": seconds_to_mmss(hook_range[0]),
+            "hook_end_time": seconds_to_mmss(hook_range[1]),
+            "transcript_evidence": "Deterministic source-video fallback range.",
+            "reasoning": "Legacy segment had no usable nested hook selection.",
+            "hook_score": segment.get("hook_score", 0),
+            "deterministic_fallback": True,
+        }
+        return hook_range, resolved_main_ranges
 
     @staticmethod
     def _build_fallback_segment(
@@ -271,22 +350,44 @@ class VideoService:
         clips_output_dir = Path(get_config().temp_dir) / "clips"
         clips_output_dir.mkdir(parents=True, exist_ok=True)
 
-        clips_info = await run_in_thread(
-            create_clips_with_transitions,
-            video_path,
-            segments,
-            clips_output_dir,
-            font_family,
-            font_size,
-            font_color,
-            caption_template,
-            output_format,
-            add_subtitles,
-            cleanup_settings,
-            hook_persist=hook_persist,
-            watermark=watermark,
-            watermark_persist=watermark_persist,
-        )
+        if not segments:
+            clips_info = await run_in_thread(
+                create_clips_with_transitions,
+                video_path,
+                segments,
+                clips_output_dir,
+                font_family,
+                font_size,
+                font_color,
+                caption_template,
+                output_format,
+                add_subtitles,
+                cleanup_settings,
+                hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
+            )
+        else:
+            clips_info = []
+            for index, segment in enumerate(segments):
+                clip_info = await VideoService.create_single_clip(
+                    video_path,
+                    segment,
+                    index,
+                    clips_output_dir,
+                    font_family,
+                    font_size,
+                    font_color,
+                    caption_template,
+                    output_format,
+                    add_subtitles,
+                    cleanup_settings,
+                    hook_persist=hook_persist,
+                    watermark=watermark,
+                    watermark_persist=watermark_persist,
+                )
+                if clip_info is not None:
+                    clips_info.append(clip_info)
 
         logger.info(f"Successfully created {len(clips_info)} clips")
         return clips_info
@@ -356,30 +457,39 @@ class VideoService:
                 video_path, keep_ranges, pull_back_to_complete_sentence=True
             )
 
+            resolved_hook = VideoService._resolve_hook(
+                segment, start_seconds, keep_ranges
+            )
+            if resolved_hook is None:
+                logger.error("Skipping clip %s: no source-grounded hook available", clip_index + 1)
+                return None
+            hook_range, keep_ranges = resolved_hook
+            if not keep_ranges:
+                logger.error("Skipping clip %s: fallback hook consumed the main range", clip_index + 1)
+                return None
             success = await run_in_thread(
-                create_optimized_clip,
+                compose_hook_and_main,
                 video_path,
-                start_seconds,
-                end_seconds,
-                clip_path,
-                add_subtitles,
-                font_family,
-                font_size,
-                font_color,
-                caption_template,
-                output_format,
+                hook_range,
                 keep_ranges,
-                segment.get("hook_title"),
+                clip_path,
+                add_subtitles=add_subtitles,
+                font_family=font_family,
+                font_size=font_size,
+                font_color=font_color,
+                caption_template=caption_template,
+                output_format=output_format,
+                hook_title=segment.get("hook_title"),
                 hook_persist=hook_persist,
                 watermark=watermark,
                 watermark_persist=watermark_persist,
             )
 
-            if not success:
+            if not success or not clip_path.is_file():
                 logger.error(f"Failed to create clip {clip_index + 1}")
                 return None
 
-            save_clip_source_ranges(clip_path, keep_ranges)
+            save_clip_source_manifest(clip_path, keep_ranges, hook_range)
             broll_final = await run_in_thread(
                 apply_broll_suggestions_to_clip,
                 clip_path,
@@ -390,6 +500,11 @@ class VideoService:
                 clip_path.unlink()
                 broll_final.rename(clip_path)
             cleaned_duration = sum(end - start for start, end in keep_ranges)
+            hook_selection = segment.get("hook_selection")
+            is_deterministic_fallback = (
+                isinstance(hook_selection, dict)
+                and hook_selection.get("deterministic_fallback") is True
+            )
             logger.info(
                 f"Created clip {clip_index + 1}: {cleaned_duration:.1f}s"
             )
@@ -408,7 +523,7 @@ class VideoService:
                 "engagement_score": segment.get("engagement_score", 0),
                 "value_score": segment.get("value_score", 0),
                 "shareability_score": segment.get("shareability_score", 0),
-                "hook_type": segment.get("hook_type"),
+                "hook_type": "deterministic_fallback" if is_deterministic_fallback else segment.get("hook_type"),
                 "hook_title": segment.get("hook_title"),
                 "keep_ranges": keep_ranges,
             }
@@ -664,6 +779,7 @@ class VideoService:
                             "shareability_score": virality.get("shareability_score", 0),
                             "hook_type": virality.get("hook_type"),
                             "hook_title": segment.get("hook_title"),
+                            "hook_selection": segment.get("hook_selection"),
                         }
                     )
                 else:
@@ -682,6 +798,10 @@ class VideoService:
                             "shareability_score": virality.get("shareability_score", 0),
                             "hook_type": virality.get("hook_type"),
                             "hook_title": getattr(segment, "hook_title", None),
+                            "hook_selection": (
+                                segment.hook_selection.model_dump()
+                                if getattr(segment, "hook_selection", None) else None
+                            ),
                         }
                     )
 

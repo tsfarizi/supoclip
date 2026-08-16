@@ -52,6 +52,7 @@ from src.transition_engine import (
     merge_clips_with_transition,
     overlay_transition_mp4,
 )
+from src.video_utils import DEFAULT_COMPOSITION_FADE_SECONDS
 from src.video_utils import ffprobe_duration
 
 from src.api.routes.media import (
@@ -297,6 +298,33 @@ class TestTransitionEngineValidation:
     def test_merge_requires_at_least_two_clips(self, tmp_path):
         with pytest.raises(ValueError):
             merge_clips_with_transition([tmp_path / "a.mp4"], "none")
+
+    def test_hook_path_is_first_input_and_none_still_composes_with_fade(
+        self, tmp_path, monkeypatch
+    ):
+        hook = tmp_path / "hook.mp4"
+        main = tmp_path / "main.mp4"
+        hook.write_bytes(b"hook")
+        main.write_bytes(b"main")
+        captured = {}
+
+        monkeypatch.setattr("src.transition_engine.ffprobe_duration", lambda _path: 4.0)
+        monkeypatch.setattr(
+            "src.transition_engine._render_chained_xfade",
+            lambda paths, durations, name, fade: captured.update(
+                paths=[Path(path) for path in paths],
+                durations=durations,
+                name=name,
+                fade=fade,
+            ) or tmp_path / "merged.mp4",
+        )
+
+        result = merge_clips_with_transition([main], "none", hook_path=hook)
+
+        assert result == tmp_path / "merged.mp4"
+        assert captured["paths"] == [hook, main]
+        assert captured["name"] == "fade"
+        assert captured["fade"] == DEFAULT_COMPOSITION_FADE_SECONDS
 
     def test_merge_rejects_missing_clip_files(self, tmp_path):
         with pytest.raises(ValueError):

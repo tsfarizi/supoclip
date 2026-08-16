@@ -12,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 SourceRange = Tuple[float, float]
-SOURCE_MAP_VERSION = 1
+SOURCE_MAP_VERSION = 2
 MIN_RANGE_SECONDS = 0.05
 
 
@@ -67,6 +67,67 @@ def save_clip_source_ranges(
         ],
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def save_clip_source_manifest(
+    clip_path: Path,
+    main_ranges: Iterable[tuple[float, float]] | None,
+    hook_range: tuple[float, float] | None = None,
+) -> None:
+    """Persist source ranges plus the private hook role used by editor merges."""
+    normalized_main = normalize_source_ranges(main_ranges)
+    normalized_hook = normalize_source_ranges([hook_range] if hook_range else None)
+    path = clip_source_map_path(clip_path)
+    if not normalized_main:
+        path.unlink(missing_ok=True)
+        return
+    payload = {
+        "version": SOURCE_MAP_VERSION,
+        "source_ranges": [
+            {"start": round(start, 6), "end": round(end, 6)}
+            for start, end in ([*normalized_hook, *normalized_main])
+        ],
+        "roles": {
+            "hook": (
+                {"start": round(normalized_hook[0][0], 6), "end": round(normalized_hook[0][1], 6)}
+                if normalized_hook else None
+            ),
+            "main": [
+                {"start": round(start, 6), "end": round(end, 6)}
+                for start, end in normalized_main
+            ],
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def load_clip_source_manifest(clip_path: Path) -> dict | None:
+    """Read role metadata while accepting the original ranges-only sidecar."""
+    path = clip_source_map_path(clip_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read clip source manifest %s: %s", path, exc)
+        return None
+    ranges = load_clip_source_ranges(clip_path)
+    if not ranges:
+        return None
+    roles = payload.get("roles") if isinstance(payload, dict) else None
+    hook = None
+    if isinstance(roles, dict) and isinstance(roles.get("hook"), dict):
+        item = roles["hook"]
+        parsed = normalize_source_ranges([(item.get("start"), item.get("end"))])
+        hook = parsed[0] if parsed else None
+    main = ranges
+    if isinstance(roles, dict) and isinstance(roles.get("main"), list):
+        parsed_main = normalize_source_ranges(
+            [(item.get("start"), item.get("end")) for item in roles["main"] if isinstance(item, dict)]
+        )
+        if parsed_main:
+            main = parsed_main
+    return {"source_ranges": ranges, "main_ranges": main, "hook_range": hook}
 
 
 def load_clip_source_ranges(clip_path: Path) -> List[SourceRange] | None:

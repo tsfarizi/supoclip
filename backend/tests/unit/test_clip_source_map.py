@@ -6,8 +6,10 @@ from src.clip_source_map import (
     clip_source_map_path,
     copy_clip_source_ranges,
     load_clip_source_ranges,
+    load_clip_source_manifest,
     normalize_source_ranges,
     save_clip_source_ranges,
+    save_clip_source_manifest,
     slice_source_ranges,
     source_range_bounds,
     split_source_ranges,
@@ -434,6 +436,30 @@ class TestSplitSourceRanges:
 
 
 class TestSaveLoadCopyEdges:
+    def test_v2_manifest_preserves_hook_and_main_roles(self, tmp_path):
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"")
+
+        save_clip_source_manifest(clip_path, [(20.0, 25.0), (30.0, 35.0)], (10.0, 15.0))
+
+        manifest = load_clip_source_manifest(clip_path)
+        assert manifest == {
+            "source_ranges": [(10.0, 15.0), (20.0, 25.0), (30.0, 35.0)],
+            "main_ranges": [(20.0, 25.0), (30.0, 35.0)],
+            "hook_range": (10.0, 15.0),
+        }
+
+    def test_legacy_ranges_only_sidecar_remains_backward_compatible(self, tmp_path):
+        clip_path = tmp_path / "clip.mp4"
+        clip_path.write_bytes(b"")
+        save_clip_source_ranges(clip_path, [(20.0, 25.0)])
+
+        assert load_clip_source_manifest(clip_path) == {
+            "source_ranges": [(20.0, 25.0)],
+            "main_ranges": [(20.0, 25.0)],
+            "hook_range": None,
+        }
+
     def test_clip_source_map_path_suffix(self):
         assert clip_source_map_path(Path("clip.mp4")) == Path("clip.source_map.json")
 

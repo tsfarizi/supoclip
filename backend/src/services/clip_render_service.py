@@ -23,9 +23,11 @@ from ..clip_source_map import (
     split_source_ranges,
     total_source_duration,
     trim_source_ranges,
+    load_clip_source_manifest,
 )
 from ..transition_spec import normalize_transition_spec
 from ..video_utils import parse_timestamp_to_seconds
+from ..video_utils import create_optimized_clip
 from ..utils.async_helpers import run_in_thread
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
 
@@ -91,7 +93,10 @@ class ClipRenderService:
     def _get_clip_source_ranges(clip: Dict[str, Any]) -> list[tuple[float, float]]:
         file_path = clip.get("file_path")
         if isinstance(file_path, str) and file_path:
-            persisted = load_clip_source_ranges(Path(file_path))
+            manifest = load_clip_source_manifest(Path(file_path))
+            persisted = (manifest or {}).get("main_ranges") if manifest else None
+            if not persisted:
+                persisted = load_clip_source_ranges(Path(file_path))
             if persisted:
                 return persisted
 
@@ -232,11 +237,16 @@ class ClipRenderService:
         ordered = sorted(clips, key=lambda c: c.get("clip_order", 0))
         paths = [Path(c["file_path"]) for c in ordered]
 
+        hook_path = await self._build_editor_hook(ordered[0])
+
         spec = normalize_transition_spec(transition or "")
-        if spec != "none" and len(paths) >= 2:
+        if (spec != "none" or hook_path is not None) and len(paths) >= 2:
             try:
                 merged_path = apply_transitions_between_clips(
-                    paths, spec, Path(self.config.temp_dir) / "clips"
+                    paths,
+                    spec,
+                    Path(self.config.temp_dir) / "clips",
+                    **({"hook_path": hook_path} if hook_path is not None else {}),
                 )
             except (RuntimeError, ValueError) as e:
                 logger.warning(
@@ -264,6 +274,14 @@ class ClipRenderService:
             end_time = self._seconds_to_mmss(merged_bounds[1])
             duration = total_source_duration(merged_ranges)
             save_clip_source_ranges(merged_path, merged_ranges)
+            if hook_path is not None:
+                manifest = load_clip_source_manifest(paths[0])
+                if manifest and manifest.get("hook_range"):
+                    from ..clip_source_map import save_clip_source_manifest
+
+                    save_clip_source_manifest(
+                        merged_path, merged_ranges, manifest["hook_range"]
+                    )
         else:
             start_time = ordered[0]["start_time"]
             end_time = ordered[-1]["end_time"]
@@ -287,6 +305,60 @@ class ClipRenderService:
 
         await self.clip_repo.reorder_task_clips(self.db, task_id)
         return {"message": "Clips merged successfully", "clip_id": first["id"]}
+
+    async def _build_editor_hook(self, clip: Dict[str, Any]) -> Optional[Path]:
+        """Materialize the first clip's persisted hook for the merge API."""
+        manifest = load_clip_source_manifest(Path(clip["file_path"]))
+        hook_range = manifest.get("hook_range") if manifest else None
+        if not hook_range:
+            return None
+        task = await self.task_repo.get_task_by_id(self.db, clip["task_id"])
+        if not task:
+            return None
+        try:
+            source: Optional[Path] = None
+            if task.get("source_type") == "video_url":
+                source = self.video_service.resolve_local_video_path(task["source_url"])
+            elif task.get("source_type") == "youtube":
+                cache = await self.cache_repo.get_cache(
+                    self.db,
+                    self._build_cache_key(
+                        task["source_url"],
+                        task["source_type"],
+                        task.get("processing_mode") or self.config.default_processing_mode,
+                        bool(task.get("include_broll", False)),
+                    ),
+                )
+                cached_path = cache.get("video_path") if cache else None
+                source = Path(cached_path) if cached_path else None
+            if source is None:
+                return None
+            if not source.is_file():
+                return None
+            metadata = task
+            output = Path(self.config.temp_dir) / "clips" / (
+                f"editor_hook_{clip['id']}.mp4"
+            )
+            ok = create_optimized_clip(
+                source,
+                hook_range[0],
+                hook_range[1],
+                output,
+                add_subtitles=metadata.get("add_subtitles", True),
+                font_family=metadata.get("font_family"),
+                font_size=metadata.get("font_size"),
+                font_color=metadata.get("font_color"),
+                caption_template=metadata.get("caption_template", "default"),
+                output_format=metadata.get("output_format", "vertical"),
+                keep_ranges=[hook_range],
+                hook_title=clip.get("hook_title"),
+                watermark=metadata.get("watermark"),
+                watermark_persist=metadata.get("watermark_persist", False),
+            )
+            return output if ok and output.is_file() else None
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            logger.warning("Unable to materialize editor hook for %s: %s", clip["id"], exc)
+            return None
 
     async def update_clip_captions(
         self,

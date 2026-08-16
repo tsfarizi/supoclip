@@ -114,13 +114,12 @@ def test_build_keep_ranges_from_source_ranges_recomputes_each_range(monkeypatch)
 @pytest.mark.asyncio
 async def test_create_single_clip_keeps_timing_fields_consistent(monkeypatch, tmp_path):
     async def fake_run_in_thread(fn, *_args, **_kwargs):
-        # Simulate a successful clip render (returns True) but a no-op B-roll
-        # pass (returns None, matching apply_broll_suggestions_to_clip when
-        # there are no suggestions); a truthy broll result would make
-        # create_single_clip unlink/rename a clip file that the mocked render
-        # never created.
-        if fn.__name__ == "create_optimized_clip":
-            return True
+        # Generated clips now always pass through hook composition.  Create
+        # the observable output so the service can complete its post-render
+        # contract; B-roll remains a no-op for this fixture.
+        if fn.__name__ == "compose_hook_and_main":
+            _args[3].write_bytes(b"rendered clip")
+            return _args[3]
         return None
 
     monkeypatch.setattr("src.services.video_service.run_in_thread", fake_run_in_thread)
@@ -131,7 +130,15 @@ async def test_create_single_clip_keeps_timing_fields_consistent(monkeypatch, tm
 
     clip = await VideoService.create_single_clip(
         video_path=Path("/tmp/demo.mp4"),
-        segment={"start_time": "00:10", "end_time": "00:20", "text": "hello"},
+        segment={
+            "start_time": "00:10",
+            "end_time": "00:20",
+            "text": "hello",
+            "hook_selection": {
+                "hook_start_time": "00:05",
+                "hook_end_time": "00:07",
+            },
+        },
         clip_index=0,
         output_dir=tmp_path,
         add_subtitles=False,
@@ -158,20 +165,29 @@ async def test_create_single_clip_accepts_positional_cleanup_and_keyword_hook_pe
     """
     video_path = tmp_path / "input.mp4"
     video_path.write_bytes(b"video")
-    segment = {"start_time": "00:10", "end_time": "00:20", "text": "hello"}
+    segment = {
+        "start_time": "00:10",
+        "end_time": "00:20",
+        "text": "hello",
+        "hook_selection": {
+            "hook_start_time": "00:05",
+            "hook_end_time": "00:07",
+        },
+    }
     cleanup_settings = {"cut_long_pauses": True}
     hook_persist = True
 
     captured: dict[str, object] = {}
 
-    def fake_create_optimized_clip(*args, **kwargs):
+    def fake_compose_hook_and_main(*args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
-        return True
+        args[3].write_bytes(b"rendered clip")
+        return args[3]
 
     monkeypatch.setattr(
-        "src.services.video_service.create_optimized_clip",
-        fake_create_optimized_clip,
+        "src.services.video_service.compose_hook_and_main",
+        fake_compose_hook_and_main,
     )
     monkeypatch.setattr(
         "src.services.video_service.build_clip_keep_ranges",
@@ -207,9 +223,8 @@ async def test_create_single_clip_accepts_positional_cleanup_and_keyword_hook_pe
 
     assert clip_info is not None
     assert captured["kwargs"]["hook_persist"] is hook_persist
-    assert captured["args"][4] is False  # add_subtitles
-    assert captured["args"][9] == "vertical"  # output_format
-    assert captured["args"][10] == [(10.0, 11.0), (12.0, 14.0)]  # keep_ranges
+    assert captured["args"][1] == (5.0, 7.0)  # source-grounded hook range
+    assert captured["args"][2] == [(10.0, 11.0), (12.0, 14.0)]  # main ranges
 
 
 @pytest.mark.asyncio

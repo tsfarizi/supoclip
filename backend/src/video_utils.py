@@ -33,6 +33,7 @@ from .clip_source_map import (
 from .caption_templates import get_template, CAPTION_TEMPLATES
 from .emoji_captions import POWER_WORDS, annotate_caption_words, normalize_token
 from .font_registry import FONTS_DIR, find_font_path, get_font_family_name
+from .transition_spec import DEFAULT_FADE_SECONDS, MAX_FADE_SECONDS, clamp_fade
 
 logger = logging.getLogger(__name__)
 TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
@@ -57,6 +58,8 @@ HOOK_TITLE_TOP_MARGIN_FRAC = 0.07
 # Extra vertical offset (px) that pushes the burned-in @watermark BELOW the
 # hook title band so the two top-band elements never overlap.
 WATERMARK_V_OFFSET = 90
+DEFAULT_COMPOSITION_FADE_SECONDS = DEFAULT_FADE_SECONDS
+MAX_COMPOSITION_FADE_SECONDS = MAX_FADE_SECONDS
 
 
 class VideoProcessor:
@@ -1187,7 +1190,10 @@ def emoji_rendering_supported() -> bool:
     return result
 
 
-def crossfade_fade_for_ranges(keep_ranges: List[Tuple[float, float]]) -> float:
+def crossfade_fade_for_ranges(
+    keep_ranges: List[Tuple[float, float]],
+    requested_seconds: Optional[float] = None,
+) -> float:
     """Crossfade duration render_source_ranges will use, or 0.0 for hard concat.
 
     A single source of truth so caption timing (which compacts the same ranges)
@@ -1197,9 +1203,12 @@ def crossfade_fade_for_ranges(keep_ranges: List[Tuple[float, float]]) -> float:
     if len(ranges) < 2 or len(ranges) > 8:
         return 0.0
     durations = [end - start for start, end in ranges]
-    if min(durations) < 0.45:
+    if requested_seconds is None and min(durations) < 0.45:
         return 0.0
-    fade = min(0.22, min(durations) * 0.5)
+    fade = clamp_fade(
+        0.22 if requested_seconds is None else requested_seconds,
+        min(durations),
+    )
     return fade if fade >= 0.06 else 0.0
 
 
@@ -1209,6 +1218,7 @@ def render_ranges_crossfade_ffmpeg(
     output_path: Path,
     has_audio: bool,
     transition: str = "fade",
+    fade_seconds: Optional[float] = None,
 ) -> bool:
     """Stitch kept ranges together with short crossfades instead of hard cuts.
 
@@ -1221,7 +1231,7 @@ def render_ranges_crossfade_ffmpeg(
     if n < 2:
         return False
     durations = [end - start for start, end in keep_ranges]
-    fade = crossfade_fade_for_ranges(keep_ranges)
+    fade = crossfade_fade_for_ranges(keep_ranges, fade_seconds)
     if fade <= 0:
         return False
 
@@ -1274,6 +1284,7 @@ def render_source_ranges_ffmpeg(
     video_path: Path,
     keep_ranges: List[Tuple[float, float]],
     output_path: Path,
+    transition_seconds: Optional[float] = None,
 ) -> bool:
     """Render source ranges into one intermediate clip using ffmpeg only."""
     keep_ranges = normalize_source_ranges(keep_ranges)
@@ -1313,9 +1324,13 @@ def render_source_ranges_ffmpeg(
 
     # Smooth a handful of substantial internal cuts with crossfades; fall back to
     # a hard concat for many tiny fragments (heavy filler edits) or on failure.
-    if crossfade_fade_for_ranges(keep_ranges) > 0:
+    if crossfade_fade_for_ranges(keep_ranges, transition_seconds) > 0:
         if render_ranges_crossfade_ffmpeg(
-            video_path, keep_ranges, output_path, has_audio
+            video_path,
+            keep_ranges,
+            output_path,
+            has_audio,
+            fade_seconds=transition_seconds,
         ):
             return True
         logger.info("Crossfade stitch failed; falling back to hard concat")
@@ -4285,6 +4300,7 @@ def create_optimized_clip(
     hook_persist: bool = False,
     watermark: Optional[str] = None,
     watermark_persist: bool = False,
+    source_transition_seconds: Optional[float] = None,
 ) -> bool:
     """Create clip with optional subtitles. output_format: 'vertical' (9:16),
     'original' (1080x1920 white-canvas fit) or 'auto'."""
@@ -4354,11 +4370,15 @@ def create_optimized_clip(
             final_clip_path = temp_root / "final.mp4"
             ass_path = temp_root / "captions.ass"
 
-            if not render_source_ranges_ffmpeg(
-                video_path,
-                effective_keep_ranges,
-                source_clip_path,
-            ):
+            render_args = (video_path, effective_keep_ranges, source_clip_path)
+            if source_transition_seconds is None:
+                rendered = render_source_ranges_ffmpeg(*render_args)
+            else:
+                rendered = render_source_ranges_ffmpeg(
+                    *render_args,
+                    transition_seconds=source_transition_seconds,
+                )
+            if not rendered:
                 raise RuntimeError("ffmpeg source-range render failed")
 
             reframe_format = (
@@ -4450,6 +4470,78 @@ def create_optimized_clip(
 
     except Exception as e:
         logger.error(f"Failed to create clip: {e}")
+        return False
+
+
+def render_hook_composition(
+    video_path: Path,
+    hook_range: Tuple[float, float],
+    main_ranges: List[Tuple[float, float]],
+    output_path: Path,
+    *,
+    add_subtitles: bool = True,
+    font_family: Optional[str] = None,
+    font_size: Optional[int] = None,
+    font_color: Optional[str] = None,
+    caption_template: str = "default",
+    output_format: str = "vertical",
+    hook_title: Optional[str] = None,
+    hook_persist: bool = False,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
+    transition_seconds: float = DEFAULT_COMPOSITION_FADE_SECONDS,
+) -> bool:
+    """Render one validated hook range before the main source ranges.
+
+    The ranges are rendered in one ffmpeg graph.  Consequently the xfade and
+    acrossfade operate on the same compact timeline; no silent padding or
+    metadata-only output can be introduced between the hook and main content.
+    """
+    try:
+        source = Path(video_path)
+        if not source.is_file() or not isinstance(hook_range, (tuple, list)):
+            return False
+        if len(hook_range) != 2:
+            return False
+        hook = normalize_source_ranges([hook_range])
+        main = normalize_source_ranges(main_ranges)
+        if not hook or not main or len(main) + 1 > 8:
+            return False
+        if not math.isfinite(float(transition_seconds)):
+            return False
+        if transition_seconds <= 0 or transition_seconds > MAX_COMPOSITION_FADE_SECONDS:
+            return False
+
+        source_duration = ffprobe_duration(source)
+        all_ranges = hook + main
+        if any(start < 0 or end > source_duration for start, end in all_ranges):
+            return False
+        if any(end <= start for start, end in all_ranges):
+            return False
+
+        destination = Path(output_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        return create_optimized_clip(
+            source,
+            hook[0][0],
+            main[-1][1],
+            destination,
+            add_subtitles=add_subtitles,
+            font_family=font_family,
+            font_size=font_size,
+            font_color=font_color,
+            caption_template=caption_template,
+            output_format=output_format,
+            keep_ranges=all_ranges,
+            hook_title=hook_title,
+            hook_persist=hook_persist,
+            watermark=watermark,
+            watermark_persist=watermark_persist,
+            source_transition_seconds=transition_seconds,
+        ) and destination.is_file() and destination.stat().st_size > 0
+    except (OSError, RuntimeError, TypeError, ValueError):
+        logger.exception("Hook composition failed")
+        Path(output_path).unlink(missing_ok=True)
         return False
 
 

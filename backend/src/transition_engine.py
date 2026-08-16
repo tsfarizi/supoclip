@@ -29,10 +29,12 @@ from .transition_spec import (
     xfade_name,
 )
 from .video_utils import (
+    DEFAULT_COMPOSITION_FADE_SECONDS,
     OUTPUT_FPS,
     ffprobe_duration,
     ffprobe_has_audio,
     ffprobe_video_size,
+    render_hook_composition,
     run_ffmpeg_command,
 )
 
@@ -201,7 +203,11 @@ def _render_chained_xfade(
 
 
 def merge_clips_with_transition(
-    paths: List[Path], spec: str, fade_seconds: Optional[float] = None
+    paths: List[Path],
+    spec: str,
+    fade_seconds: Optional[float] = None,
+    *,
+    hook_path: Optional[Path] = None,
 ) -> Path:
     """Merge clips into one video, applying the transition described by spec.
 
@@ -210,6 +216,11 @@ def merge_clips_with_transition(
     "file:<stem>" is owned by the orchestrator and hard-concats here.
     """
     clip_paths = [Path(p) for p in paths]
+    if hook_path is not None:
+        hook = Path(hook_path)
+        if not hook.is_file():
+            raise ValueError(f"Hook file does not exist: {hook}")
+        clip_paths.insert(0, hook)
     if len(clip_paths) < 2:
         raise ValueError("merge_clips_with_transition requires at least 2 clips")
     for path in clip_paths:
@@ -217,6 +228,8 @@ def merge_clips_with_transition(
             raise ValueError(f"Clip file does not exist: {path}")
 
     normalized = normalize_transition_spec(spec)
+    if hook_path is not None and normalized == "none":
+        normalized = "xfade:fade"
     name = xfade_name(normalized)
     if name is None:
         return _hard_concat(clip_paths)
@@ -229,7 +242,15 @@ def merge_clips_with_transition(
 
     durations = [ffprobe_duration(p) for p in clip_paths]
     configured_fade = getattr(get_config(), "clip_crossfade_seconds", None) or 0.0
-    requested = fade_seconds or configured_fade or DEFAULT_FADE_SECONDS
+    requested = (
+        fade_seconds
+        if fade_seconds is not None
+        else (
+            DEFAULT_COMPOSITION_FADE_SECONDS
+            if hook_path is not None
+            else configured_fade or DEFAULT_FADE_SECONDS
+        )
+    )
     fade = clamp_fade(requested, min(durations))
     if fade < _MIN_FADE_SECONDS:
         logger.warning(
@@ -239,6 +260,53 @@ def merge_clips_with_transition(
         return _hard_concat(clip_paths)
 
     return _render_chained_xfade(clip_paths, durations, name, fade)
+
+
+def compose_hook_and_main(
+    video_path: Path,
+    hook_range: Tuple[float, float],
+    main_ranges: List[Tuple[float, float]],
+    output_path: Path,
+    *,
+    add_subtitles: bool = True,
+    font_family: Optional[str] = None,
+    font_size: Optional[int] = None,
+    font_color: Optional[str] = None,
+    caption_template: str = "default",
+    output_format: str = "vertical",
+    hook_title: Optional[str] = None,
+    hook_persist: bool = False,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
+    fade_seconds: float = DEFAULT_COMPOSITION_FADE_SECONDS,
+) -> Path:
+    """Render ``hook_range -> xfade -> main_ranges`` as actual media.
+
+    This is the source-range entry point for generated clips.  Editor merge
+    callers should use ``merge_clips_with_transition(..., hook_path=...)`` or
+    ``apply_transitions_between_clips(..., hook_path=...)`` when the hook has
+    already been rendered as a clip.
+    """
+    destination = Path(output_path)
+    if not render_hook_composition(
+        Path(video_path),
+        hook_range,
+        main_ranges,
+        destination,
+        add_subtitles=add_subtitles,
+        font_family=font_family,
+        font_size=font_size,
+        font_color=font_color,
+        caption_template=caption_template,
+        output_format=output_format,
+        hook_title=hook_title,
+        hook_persist=hook_persist,
+        watermark=watermark,
+        watermark_persist=watermark_persist,
+        transition_seconds=fade_seconds,
+    ):
+        raise RuntimeError("Hook composition renderer did not produce media")
+    return destination
 
 
 # --- transition MP4 overlay -------------------------------------------------
@@ -448,7 +516,11 @@ def overlay_transition_mp4(
 
 
 def apply_transitions_between_clips(
-    paths: List[Path], spec: str, output_dir: Path
+    paths: List[Path],
+    spec: str,
+    output_dir: Path,
+    *,
+    hook_path: Optional[Path] = None,
 ) -> Path:
     """Stitch N clips into one video applying spec between consecutive clips.
 
@@ -459,6 +531,11 @@ def apply_transitions_between_clips(
     Final output lands in output_dir as merged_transition_<uuid12>.mp4.
     """
     clip_paths = [Path(p) for p in paths]
+    if hook_path is not None:
+        hook = Path(hook_path)
+        if not hook.is_file():
+            raise ValueError(f"Hook file does not exist: {hook}")
+        clip_paths.insert(0, hook)
     if len(clip_paths) < 2:
         raise ValueError("apply_transitions_between_clips requires at least 2 clips")
     for path in clip_paths:
@@ -470,8 +547,14 @@ def apply_transitions_between_clips(
     final_path = output_dir / f"merged_transition_{uuid.uuid4().hex[:12]}.mp4"
 
     normalized = normalize_transition_spec(spec)
+    if hook_path is not None and normalized == "none":
+        normalized = "xfade:fade"
     if transition_kind(normalized) != "file":
-        merged = merge_clips_with_transition(clip_paths, normalized)
+        merged = merge_clips_with_transition(
+            clip_paths,
+            normalized,
+            DEFAULT_COMPOSITION_FADE_SECONDS if hook_path is not None else None,
+        )
         _move_to(merged, final_path)
         _discard_intermediate(merged)
         return final_path

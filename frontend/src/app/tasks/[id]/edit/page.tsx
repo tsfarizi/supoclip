@@ -31,6 +31,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Slider } from "@/components/ui/slider";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { getHookTypeLabel, type MergeClipsPayload } from "@/lib/task-types";
 
 interface TaskDetails {
   id: string;
@@ -49,7 +50,8 @@ interface Clip {
   end_time: string;
   text: string;
   video_url: string;
-  hook_title: string | null;
+  hook_title?: string | null;
+  hook_type?: string | null;
 }
 
 interface VideoFx {
@@ -371,7 +373,10 @@ export default function TaskEditPage() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ clip_ids: mergeSelection, transition: transitionSpec }),
+        body: JSON.stringify({
+          clip_ids: mergeSelection,
+          transition: transitionSpec,
+        } satisfies MergeClipsPayload),
       });
       if (!response.ok) throw new Error(await buildSupportError(response, "Failed to merge selected clips"));
     });
@@ -1040,9 +1045,16 @@ export default function TaskEditPage() {
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <p className="font-medium text-sm text-black">Clip {clip.clip_order}</p>
+                            <p className="font-medium text-sm text-black">
+                              {clip.hook_title || `Clip ${clip.clip_order}`}
+                            </p>
                             <p className="text-xs text-gray-500">{clip.start_time} - {clip.end_time}</p>
                             <p className="text-xs text-gray-500">{formatDuration(clip.duration)}</p>
+                            {clip.hook_type && clip.hook_type !== "none" && (
+                              <Badge variant="outline" className="mt-1 text-[10px]">
+                                {getHookTypeLabel(clip.hook_type)}
+                              </Badge>
+                            )}
                           </div>
                           <label className="flex items-center gap-1 text-xs text-gray-600" onClick={(e) => e.stopPropagation()}>
                             <input type="checkbox" checked={isSelectedForMerge} onChange={() => toggleMergeSelection(clip.id)} />

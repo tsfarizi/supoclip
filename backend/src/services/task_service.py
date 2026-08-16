@@ -46,6 +46,7 @@ from ..clip_cleanup import normalize_clip_cleanup_settings
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
 from ..clip_source_map import (
     load_clip_source_ranges,
+    load_clip_source_manifest,
     source_range_bounds,
 )
 
@@ -845,6 +846,18 @@ class TaskService:
                     "shareability_score": clip.get("shareability_score", 0),
                     "hook_type": clip.get("hook_type"),
                     "hook_title": clip.get("hook_title"),
+                    **(
+                        {"hook_selection": {
+                            "hook_start_time": self._seconds_to_mmss(manifest["hook_range"][0]),
+                            "hook_end_time": self._seconds_to_mmss(manifest["hook_range"][1]),
+                            "transcript_evidence": "stored clip hook",
+                            "reasoning": "Reused persisted hook source range",
+                            "hook_score": clip.get("hook_score", 0),
+                        }}
+                        if (manifest := load_clip_source_manifest(Path(clip["file_path"])))
+                        and manifest.get("hook_range")
+                        else {}
+                    ),
                 }
             )
 
@@ -949,7 +962,10 @@ class TaskService:
     def _get_clip_source_ranges(clip: Dict[str, Any]) -> list[tuple[float, float]]:
         file_path = clip.get("file_path")
         if isinstance(file_path, str) and file_path:
-            persisted = load_clip_source_ranges(Path(file_path))
+            manifest = load_clip_source_manifest(Path(file_path))
+            persisted = (manifest or {}).get("main_ranges") if manifest else None
+            if not persisted:
+                persisted = load_clip_source_ranges(Path(file_path))
             if persisted:
                 return persisted
 
