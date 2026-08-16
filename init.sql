@@ -64,6 +64,8 @@ CREATE TABLE tasks (
     caption_template VARCHAR(50) DEFAULT 'default',
     include_broll BOOLEAN DEFAULT false,
     hook_persist BOOLEAN NOT NULL DEFAULT false,
+    watermark TEXT,
+    watermark_persist BOOLEAN NOT NULL DEFAULT false,
     processing_mode VARCHAR(20) NOT NULL DEFAULT 'fast',
     started_at TIMESTAMP WITH TIME ZONE,
     completed_at TIMESTAMP WITH TIME ZONE,

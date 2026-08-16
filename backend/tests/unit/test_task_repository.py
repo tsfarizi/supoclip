@@ -190,6 +190,46 @@ async def test_create_task_defaults_hook_persist_to_false(db_session):
         await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
 
 
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_task_round_trip_persists_watermark_and_persist(db_session):
+    # watermark / watermark_persist are new plumbing flowing
+    # create_task -> repository (mirrors the hook_persist Schema v3 pattern).
+    user_id = await _seed_user(db_session)
+    source_id = await _seed_source(db_session)
+    task_id = await TaskRepository.create_task(
+        db_session,
+        user_id=user_id,
+        source_id=source_id,
+        watermark="myhandle",
+        watermark_persist=True,
+    )
+    try:
+        task = await TaskRepository.get_task_by_id(db_session, task_id)
+        assert task["watermark"] == "myhandle"
+        assert task["watermark_persist"] is True
+    finally:
+        await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_task_defaults_watermark_none_and_persist_false(db_session):
+    # Column contract: watermark TEXT (nullable), watermark_persist BOOLEAN
+    # NOT NULL DEFAULT false.
+    user_id = await _seed_user(db_session)
+    source_id = await _seed_source(db_session)
+    task_id = await TaskRepository.create_task(
+        db_session,
+        user_id=user_id,
+        source_id=source_id,
+    )
+    try:
+        task = await TaskRepository.get_task_by_id(db_session, task_id)
+        assert task["watermark"] is None
+        assert task["watermark_persist"] is False
+    finally:
+        await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
+
+
 # ---------------------------------------------------------------------------
 # get_task_by_id
 # ---------------------------------------------------------------------------
@@ -415,6 +455,38 @@ async def test_update_task_settings_persists_hook_persist_false(db_session):
         )
         task = await TaskRepository.get_task_by_id(db_session, task_id)
         assert task["hook_persist"] is False
+    finally:
+        await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_update_task_settings_persists_watermark_and_persist(db_session):
+    # watermark / watermark_persist flow through update_task_settings like
+    # hook_persist: the columns are updated, not just the Redis metadata cache.
+    user_id = await _seed_user(db_session)
+    source_id = await _seed_source(db_session)
+    task_id = await TaskRepository.create_task(
+        db_session,
+        user_id=user_id,
+        source_id=source_id,
+        watermark="old",
+        watermark_persist=True,
+    )
+    try:
+        await TaskRepository.update_task_settings(
+            db_session,
+            task_id,
+            "Roboto",
+            40,
+            "#112233",
+            "kicker",
+            True,
+            watermark="new",
+            watermark_persist=False,
+        )
+        task = await TaskRepository.get_task_by_id(db_session, task_id)
+        assert task["watermark"] == "new"
+        assert task["watermark_persist"] is False
     finally:
         await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
 

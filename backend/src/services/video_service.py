@@ -257,6 +257,8 @@ class VideoService:
         add_subtitles: bool = True,
         cleanup_settings: Optional[Dict[str, Any]] = None,
         hook_persist: bool = False,
+        watermark: Optional[str] = None,
+        watermark_persist: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Create standalone video clips from segments with optional subtitles.
@@ -282,6 +284,8 @@ class VideoService:
             add_subtitles,
             cleanup_settings,
             hook_persist=hook_persist,
+            watermark=watermark,
+            watermark_persist=watermark_persist,
         )
 
         logger.info(f"Successfully created {len(clips_info)} clips")
@@ -301,6 +305,8 @@ class VideoService:
         add_subtitles: bool = True,
         cleanup_settings: Optional[Dict[str, Any]] = None,
         hook_persist: bool = False,
+        watermark: Optional[str] = None,
+        watermark_persist: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
         try:
@@ -365,6 +371,8 @@ class VideoService:
                 keep_ranges,
                 segment.get("hook_title"),
                 hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
             )
 
             if not success:

@@ -100,6 +100,8 @@ def _merge_task_source_metadata(
     output_format: Any = None,
     add_subtitles: Any = None,
     hook_persist: Any = None,
+    watermark: Any = None,
+    watermark_persist: Any = None,
     cleanup_settings: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     merged = dict(existing or {})
@@ -114,6 +116,10 @@ def _merge_task_source_metadata(
         merged["add_subtitles"] = add_subtitles
     if isinstance(hook_persist, bool):
         merged["hook_persist"] = hook_persist
+    if isinstance(watermark, str) and watermark.strip():
+        merged["watermark"] = watermark
+    if isinstance(watermark_persist, bool):
+        merged["watermark_persist"] = watermark_persist
     if cleanup_settings:
         merged.update(cleanup_settings)
 
@@ -231,6 +237,12 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     hook_persist = data.get("hook_persist", False)
     if not isinstance(hook_persist, bool):
         hook_persist = False
+    watermark = data.get("watermark")
+    if not isinstance(watermark, str):
+        watermark = None
+    watermark_persist = data.get("watermark_persist", False)
+    if not isinstance(watermark_persist, bool):
+        watermark_persist = False
     cleanup_settings = normalize_clip_cleanup_settings(
         data.get("cut_long_pauses"),
         data.get("pause_threshold_ms"),
@@ -274,6 +286,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             output_format=output_format,
             add_subtitles=add_subtitles,
             hook_persist=hook_persist,
+            watermark=watermark,
+            watermark_persist=watermark_persist,
             cleanup_settings=cleanup_settings,
         )
 
@@ -300,6 +314,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             add_subtitles,
             hook_persist=hook_persist,
             include_broll=include_broll,
+            watermark=watermark,
+            watermark_persist=watermark_persist,
             cleanup_settings=cleanup_settings,
         )
 
@@ -314,6 +330,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                 output_format=output_format,
                 add_subtitles=add_subtitles,
                 hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
                 cleanup_settings=cleanup_settings,
             ),
         )
@@ -881,6 +899,14 @@ async def apply_task_settings(
         )
         if not isinstance(hook_persist, bool):
             hook_persist = False
+        watermark = payload.get("watermark", task_record.get("watermark"))
+        if not isinstance(watermark, str):
+            watermark = None
+        watermark_persist = payload.get(
+            "watermark_persist", task_record.get("watermark_persist", False)
+        )
+        if not isinstance(watermark_persist, bool):
+            watermark_persist = False
         task = await task_service.update_task_settings(
             task_id,
             font_family,
@@ -893,6 +919,8 @@ async def apply_task_settings(
             output_format=output_format,
             add_subtitles=add_subtitles,
             hook_persist=hook_persist,
+            watermark=watermark,
+            watermark_persist=watermark_persist,
         )
         metadata = await _load_task_source_metadata(task_id)
         await _save_task_source_metadata(
@@ -904,6 +932,8 @@ async def apply_task_settings(
                 output_format=task.get("output_format"),
                 add_subtitles=task.get("add_subtitles"),
                 hook_persist=task.get("hook_persist"),
+                watermark=task.get("watermark"),
+                watermark_persist=task.get("watermark_persist"),
                 cleanup_settings=cleanup_settings,
             ),
         )
@@ -1038,6 +1068,12 @@ async def resume_task(
         hook_persist = task.get("hook_persist", False)
         if not isinstance(hook_persist, bool):
             hook_persist = False
+        watermark = task.get("watermark")
+        if not isinstance(watermark, str):
+            watermark = None
+        watermark_persist = task.get("watermark_persist", False)
+        if not isinstance(watermark_persist, bool):
+            watermark_persist = False
         cleanup_settings = None
         cleanup_settings_json = task.get("cleanup_settings_json")
         if cleanup_settings_json is not None:
@@ -1122,6 +1158,8 @@ async def resume_task(
             add_subtitles,
             hook_persist=hook_persist,
             include_broll=bool(task.get("include_broll", False)),
+            watermark=watermark,
+            watermark_persist=watermark_persist,
             cleanup_settings=cleanup_settings,
         )
 

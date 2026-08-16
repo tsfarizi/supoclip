@@ -19,7 +19,7 @@ import { buildFontOptionsPayload, FONT_SIZE_OPTIONS, FONT_TEMPLATE_DEFAULT_VALUE
 import { normalizeVideoIdentity } from "@/lib/video-identity";
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, Paintbrush, Film, Sparkles, Upload, Monitor, Menu, X, LogOut, List, Shield, Settings } from "lucide-react";
+import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, Paintbrush, Film, Sparkles, Upload, Monitor, Menu, X, LogOut, List, Shield, Settings, AtSign } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 
 interface LatestTask {
@@ -229,6 +229,8 @@ export default function HomeApp() {
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("vertical");
   const [addSubtitles, setAddSubtitles] = useState(true);
   const [hookPersist, setHookPersist] = useState(false);
+  const [watermark, setWatermark] = useState("");
+  const [watermarkPersist, setWatermarkPersist] = useState(false);
   const [includeBroll, setIncludeBroll] = useState(false);
   const [pexelsConfigured, setPexelsConfigured] = useState<boolean | null>(null);
   const [cutLongPauses, setCutLongPauses] = useState(false);
@@ -580,6 +582,8 @@ export default function HomeApp() {
           output_format: outputFormat,
           add_subtitles: addSubtitles,
           hook_persist: hookPersist,
+          watermark: watermark,
+          watermark_persist: watermarkPersist,
           include_broll: includeBroll,
           cut_long_pauses: cutLongPauses,
           pause_threshold_ms: normalizedPauseThreshold,
@@ -604,6 +608,8 @@ export default function HomeApp() {
         output_format: outputFormat,
         add_subtitles: addSubtitles,
         hook_persist: hookPersist,
+        watermark: watermark,
+        watermark_persist: watermarkPersist,
         include_broll: includeBroll,
         cut_long_pauses: cutLongPauses,
         pause_threshold_ms: normalizedPauseThreshold,
@@ -1137,6 +1143,34 @@ export default function HomeApp() {
                       onCheckedChange={setHookPersist}
                       disabled={generationControlsDisabled}
                     />
+                  </div>
+
+                  {/* Watermark */}
+                  <div className="rounded-lg border bg-stone-50 p-3 space-y-2">
+                    <div className="flex items-center gap-3">
+                      <AtSign className="w-4 h-4 text-emerald-500" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Watermark</h3>
+                        <p className="text-xs text-stone-500">Shown below the hook headline (adds @ automatically)</p>
+                      </div>
+                    </div>
+                    <Input
+                      value={watermark}
+                      onChange={(e) => setWatermark(e.target.value)}
+                      disabled={generationControlsDisabled}
+                      placeholder="your handle"
+                    />
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-medium text-stone-900">Keep watermark on screen</div>
+                        <div className="text-xs text-stone-500">Keep the watermark visible for the whole clip</div>
+                      </div>
+                      <Switch
+                        checked={watermarkPersist}
+                        onCheckedChange={setWatermarkPersist}
+                        disabled={generationControlsDisabled}
+                      />
+                    </div>
                   </div>
 
                   {/* B-roll footage */}

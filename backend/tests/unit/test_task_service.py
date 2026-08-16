@@ -182,6 +182,8 @@ async def test_update_clip_captions_passes_stored_task_style(monkeypatch, tmp_pa
         "output_format": "vertical",
         "hook_persist": False,
         "hook_title": None,
+        "watermark": None,
+        "watermark_persist": False,
         "progress_callback": captured["kwargs"]["progress_callback"],
     }
     assert callable(captured["kwargs"]["progress_callback"])

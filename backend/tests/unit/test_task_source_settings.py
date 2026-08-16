@@ -50,6 +50,8 @@ def _default_settings() -> dict:
         "remove_filler_words": False,
         "filtered_words": [],
         "hook_persist": False,
+        "watermark": None,
+        "watermark_persist": False,
     }
 
 
@@ -109,6 +111,9 @@ async def test_load_task_source_settings_uses_db_columns_without_touching_redis(
         "filtered_words": ["basically", "like"],
         # hook_persist is absent on the task row, so the default false resolves.
         "hook_persist": False,
+        # watermark columns are absent on the task row, so defaults resolve.
+        "watermark": None,
+        "watermark_persist": False,
     }
 
 
@@ -384,3 +389,86 @@ async def test_load_task_source_settings_non_bool_hook_persist_from_redis_falls_
     settings = await service._load_task_source_settings(_legacy_task_dict())
 
     assert settings["hook_persist"] is False
+
+
+# ---------------------------------------------------------------------------
+# watermark / watermark_persist plumbing: watermark TEXT (nullable),
+# watermark_persist BOOLEAN NOT NULL DEFAULT false; the DB column is the
+# authority over the legacy Redis metadata cache.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_load_task_source_settings_defaults_watermark_none_and_persist_false(
+    monkeypatch,
+):
+    # A legacy row with no watermark columns and no watermark in Redis must
+    # resolve to watermark None and watermark_persist False.
+    monkeypatch.setattr(
+        "src.services.task_metadata_service.get_redis_client",
+        lambda **_kwargs: _RedisClient(
+            json.dumps({"output_format": "vertical", "add_subtitles": True})
+        ),
+    )
+
+    service = TaskService(db=None)
+    settings = await service._load_task_source_settings(_legacy_task_dict())
+
+    assert settings["watermark"] is None
+    assert settings["watermark_persist"] is False
+
+
+@pytest.mark.asyncio
+async def test_load_task_source_settings_db_watermark_wins_over_redis(monkeypatch):
+    # DB columns must win over a Redis payload that says otherwise.
+    payload = json.dumps(
+        {
+            "output_format": "vertical",
+            "add_subtitles": True,
+            "watermark": "redis-handle",
+            "watermark_persist": False,
+        }
+    )
+    monkeypatch.setattr(
+        "src.services.task_metadata_service.get_redis_client",
+        lambda **_kwargs: _RedisClient(payload),
+    )
+
+    task = {
+        "id": "task-123",
+        "output_format": "vertical",
+        "add_subtitles": True,
+        "cleanup_settings_json": None,
+        "watermark": "db-handle",
+        "watermark_persist": True,
+    }
+
+    service = TaskService(db=None)
+    settings = await service._load_task_source_settings(task)
+
+    assert settings["watermark"] == "db-handle"  # DB column wins
+    assert settings["watermark_persist"] is True  # DB column wins
+
+
+@pytest.mark.asyncio
+async def test_load_task_source_settings_non_bool_watermark_persist_falls_back_to_false(
+    monkeypatch,
+):
+    # A non-boolean watermark_persist in the Redis cache is not trusted: the
+    # resolved value must fall back to the default false.
+    payload = json.dumps(
+        {
+            "output_format": "vertical",
+            "add_subtitles": True,
+            "watermark": "some-handle",
+            "watermark_persist": "yes",
+        }
+    )
+    monkeypatch.setattr(
+        "src.services.task_metadata_service.get_redis_client",
+        lambda **_kwargs: _RedisClient(payload),
+    )
+
+    service = TaskService(db=None)
+    settings = await service._load_task_source_settings(_legacy_task_dict())
+
+    assert settings["watermark_persist"] is False

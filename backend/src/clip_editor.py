@@ -266,6 +266,8 @@ def overlay_custom_captions(
     output_format: str = "vertical",
     hook_persist: bool = False,
     hook_title: Optional[str] = None,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Path:
     def _report(progress: int, message: str) -> None:
@@ -300,6 +302,8 @@ def overlay_custom_captions(
             keep_ranges=source_ranges,
             hook_title=hook_title,
             hook_persist=hook_persist,
+            watermark=watermark,
+            watermark_persist=watermark_persist,
         )
         if rendered_clean:
             base_input = clean_path
@@ -346,6 +350,8 @@ def overlay_custom_captions(
         position_y_override=position_y,
         highlight_words=highlight_words,
         hook_persist=hook_persist,
+        watermark=watermark,
+        watermark_persist=watermark_persist,
     ):
         raise RuntimeError("Failed to build edited captions")
 

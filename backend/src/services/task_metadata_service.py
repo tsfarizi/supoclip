@@ -61,12 +61,16 @@ class TaskMetadataService:
             "output_format": "vertical",
             "add_subtitles": True,
             "hook_persist": False,
+            "watermark": None,
+            "watermark_persist": False,
             **normalize_clip_cleanup_settings(),
         }
 
         output_format = task.get("output_format")
         add_subtitles = task.get("add_subtitles")
         hook_persist = task.get("hook_persist")
+        watermark = task.get("watermark")
+        watermark_persist = task.get("watermark_persist")
         cleanup_settings_json = task.get("cleanup_settings_json")
 
         needs_redis = (
@@ -109,6 +113,33 @@ class TaskMetadataService:
         elif not isinstance(hook_persist, bool):
             hook_persist = defaults["hook_persist"]
 
+        # Watermark plumbing mirrors hook_persist: the DB column wins; a NULL
+        # watermark only reads the legacy Redis cache. The column is nullable,
+        # so `watermark is None` is NOT part of needs_redis: a fresh row with
+        # no watermark must not force a Redis read (legacy rows already trigger
+        # it through their NULL Schema v2 columns).
+        if watermark is None:
+            redis_watermark = payload.get("watermark", defaults["watermark"])
+            watermark = (
+                redis_watermark
+                if isinstance(redis_watermark, str)
+                else defaults["watermark"]
+            )
+        elif not isinstance(watermark, str):
+            watermark = defaults["watermark"]
+
+        if watermark_persist is None:
+            redis_watermark_persist = payload.get(
+                "watermark_persist", defaults["watermark_persist"]
+            )
+            watermark_persist = (
+                redis_watermark_persist
+                if isinstance(redis_watermark_persist, bool)
+                else defaults["watermark_persist"]
+            )
+        elif not isinstance(watermark_persist, bool):
+            watermark_persist = defaults["watermark_persist"]
+
         cleanup_payload: Dict[str, Any] = {}
         if cleanup_settings_json is not None:
             # asyncpg 0.31 decodes the jsonb column to a dict natively, so the
@@ -130,6 +161,8 @@ class TaskMetadataService:
             "output_format": output_format,
             "add_subtitles": add_subtitles,
             "hook_persist": hook_persist,
+            "watermark": watermark,
+            "watermark_persist": watermark_persist,
             **normalize_clip_cleanup_settings(
                 cleanup_payload.get("cut_long_pauses"),
                 cleanup_payload.get("pause_threshold_ms"),

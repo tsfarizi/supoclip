@@ -61,6 +61,8 @@ async def process_video_task(
     add_subtitles: bool = True,
     hook_persist: bool = False,
     include_broll: bool = False,
+    watermark: Optional[str] = None,
+    watermark_persist: bool = False,
     cleanup_settings: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
@@ -128,6 +130,8 @@ async def process_video_task(
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
                 cleanup_settings=cleanup_settings,
             )
 

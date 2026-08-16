@@ -386,6 +386,8 @@ class ClipRenderService:
                 output_format=task.get("output_format") or "vertical",
                 hook_persist=bool(task.get("hook_persist", False)),
                 hook_title=clip.get("hook_title"),
+                watermark=task.get("watermark"),
+                watermark_persist=bool(task.get("watermark_persist", False)),
                 progress_callback=publish_render_progress,
             )
             if not output_path.exists():
