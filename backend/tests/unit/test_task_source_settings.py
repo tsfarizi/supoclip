@@ -52,6 +52,7 @@ def _default_settings() -> dict:
         "hook_persist": False,
         "watermark": None,
         "watermark_persist": False,
+        "sound_effects_count": 0,
     }
 
 
@@ -114,6 +115,7 @@ async def test_load_task_source_settings_uses_db_columns_without_touching_redis(
         # watermark columns are absent on the task row, so defaults resolve.
         "watermark": None,
         "watermark_persist": False,
+        "sound_effects_count": 0,
     }
 
 

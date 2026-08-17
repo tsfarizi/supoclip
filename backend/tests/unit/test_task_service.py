@@ -115,7 +115,7 @@ def test_cache_key_freezes_payload_ordering_and_broll_flag(
     expected = hashlib.sha256(
         (
             f"{source_type}|{processing_mode}|{int(include_broll)}|"
-            f"{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{url.strip()}"
+            f"0|{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{url.strip()}"
         ).encode("utf-8")
     ).hexdigest()
 

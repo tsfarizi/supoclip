@@ -24,6 +24,50 @@ backend/data/
 # dependencies (any nested node_modules, e.g. frontend/packages/*, monorepo sub-apps)
 node_modules/
 
+# audio assets (SFX downloads/cache, uploaded sources, generated audio)
+*.mp3
+*.wav
+*.aac
+*.ogg
+*.flac
+*.aif
+*.aiff
+*.opus
+*.wma
+
+# incomplete/partial downloads (yt-dlp fragments, ffmpeg, resume temp files)
+*.part
+*.ytdl
+*.f[0-9]*.mp4
+*.f[0-9]*.webm
+
+# Freesound SFX runtime artifacts (cache, downloads, generated clips)
+backend/temp/sound_effect_cache/
+backend/temp/sfx-downloads/
+backend/temp/clips/
+backend/temp/frames/
+
+# python virtual environments
+.venv/
+venv/
+env/
+
+# python tooling caches and reports
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+*.pyc
+
+# browser automation screenshots
+.agent-screenshots/
+
+# graphify knowledge-graph outputs
+graphify-out/
+
+# local environment overrides (never commit real secrets)
+.env*.local
+
 # playwright test artifacts
 test-results/
 playwright-report/

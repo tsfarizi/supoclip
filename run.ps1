@@ -147,7 +147,32 @@ if (-not $dbOk) {
     Write-Ok "Schema present"
 }
 
-# --- 7. dependency install --------------------------------------------------
+# --- 7. versioned migrations -------------------------------------------------
+# init.sql is only a fresh-database bootstrap. Apply tracked migrations before
+# launching either process so existing databases receive the same schema.
+$env:PGPASSWORD = 'supoclip_password'
+$migrationDir = Join-Path $repo 'backend\src\migrations\sql'
+Invoke-Psql 'supoclip' 'supoclip' "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(255) PRIMARY KEY, applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);"
+if ($script:pgExit -ne 0) { Write-Fail "Unable to create the migration ledger."; Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit 1 }
+foreach ($migration in @(Get-ChildItem -LiteralPath $migrationDir -Filter '*.sql' -File | Sort-Object Name)) {
+    $version = $migration.Name
+    $applied = & $psql -U supoclip -h localhost -p 5433 -d supoclip -At -c "SELECT 1 FROM schema_migrations WHERE version = '$version' LIMIT 1;" 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Fail "Unable to inspect migration ledger."; Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit 1 }
+    if (($applied -join '').Trim() -eq '1') { continue }
+
+    $migrationSql = Get-Content -LiteralPath $migration.FullName -Raw
+    $transactionSql = "BEGIN;`n$migrationSql`nINSERT INTO schema_migrations (version) VALUES ('$version');`nCOMMIT;"
+    & $psql -U supoclip -h localhost -p 5433 -d supoclip -v ON_ERROR_STOP=1 -c $transactionSql 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Migration $version failed; startup aborted."
+        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+        exit 1
+    }
+}
+Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+Write-Ok "Versioned migrations applied"
+
+# --- 8. dependency install --------------------------------------------------
 if (-not $SkipDeps) {
     if (-not (Test-Path (Join-Path $repo 'backend\.venv\Scripts\python.exe'))) {
         Write-Step "uv sync (backend)"

@@ -4,7 +4,8 @@ Optimized for ffmpeg, AssemblyAI integration, and high-quality output.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Mapping, Sequence, Union
+from dataclasses import dataclass
 import logging
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
@@ -1060,6 +1061,37 @@ AUDIO_BITRATE = "192k"
 # Normalise perceived loudness to the short-form social target (~ -14 LUFS).
 LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
+MAX_SFX_LAYERS = 8
+VALID_SFX_PLACEMENTS = {"hook", "transition", "main"}
+
+
+@dataclass(frozen=True)
+class AudioSfxPlacement:
+    """A resolved, clip-local SFX placement consumed by the audio mixer."""
+
+    asset_path: Path
+    start_seconds: float
+    end_seconds: float
+    volume: float = 1.0
+    fade_in_seconds: float = 0.0
+    fade_out_seconds: float = 0.0
+    placement: str = "main"
+
+
+@dataclass(frozen=True)
+class AudioMixResult:
+    """Closed result for an optional audio render; degraded is never reported as success."""
+
+    status: str
+    output_path: Optional[Path]
+    applied_sfx: int
+    discarded_sfx: int
+    reason: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {"unchanged", "mixed"}
+
 
 def build_final_video_encode_args(
     crf: int = FINAL_VIDEO_CRF,
@@ -1088,6 +1120,174 @@ def build_audio_output_args(has_audio: bool, loudnorm: bool = True) -> List[str]
         args += ["-af", LOUDNORM_FILTER]
     args += ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", "48000"]
     return args
+
+
+def _coerce_sfx_placement(value: Union[AudioSfxPlacement, Mapping[str, Any]]) -> AudioSfxPlacement:
+    if isinstance(value, AudioSfxPlacement):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError("SFX placement must be AudioSfxPlacement or a mapping")
+
+    def number(*keys: str, default: Optional[float] = None) -> float:
+        for key in keys:
+            if key in value:
+                return float(value[key])
+        if default is None:
+            raise ValueError(f"SFX placement is missing {keys[0]}")
+        return default
+
+    asset = value.get("asset_path", value.get("path"))
+    if not asset:
+        raise ValueError("SFX placement is missing asset_path")
+    return AudioSfxPlacement(
+        asset_path=Path(str(asset)),
+        start_seconds=number("start_seconds", "start_time"),
+        end_seconds=number("end_seconds", "end_time"),
+        volume=number("volume", default=1.0),
+        fade_in_seconds=number("fade_in_seconds", "fade_in", default=0.0),
+        fade_out_seconds=number("fade_out_seconds", "fade_out", default=0.0),
+        placement=str(value.get("placement", "main")).strip().lower(),
+    )
+
+
+def mix_clip_audio_with_sfx(
+    rendered_clip: Path,
+    sfx_placements: Sequence[Union[AudioSfxPlacement, Mapping[str, Any]]],
+    output_path: Path,
+    *,
+    clip_duration: Optional[float] = None,
+    max_layers: int = MAX_SFX_LAYERS,
+) -> AudioMixResult:
+    """Mix clip audio with resolved local-time SFX without changing its video.
+
+    Contract: ``start_seconds``/``end_seconds`` are positions on the already
+    rendered Hook->Transition->Main timeline. ``placement`` is metadata and
+    must be one of ``hook``, ``transition``, or ``main``; callers resolve those
+    positions before invoking this function. Invalid or overlapping placements
+    are discarded, while ffmpeg failure returns ``failed`` and removes output.
+    """
+    source = Path(rendered_clip)
+    destination = Path(output_path)
+    if max_layers < 1:
+        return AudioMixResult("failed", None, 0, len(sfx_placements), "max_layers must be positive")
+    if not source.is_file():
+        return AudioMixResult("failed", None, 0, len(sfx_placements), "rendered clip does not exist")
+    try:
+        if source.resolve() == Path(output_path).resolve() and sfx_placements:
+            return AudioMixResult("failed", None, 0, len(sfx_placements), "output_path must differ from rendered_clip")
+    except OSError:
+        return AudioMixResult("failed", None, 0, len(sfx_placements), "unable to resolve media paths")
+
+    discarded = 0
+    candidates: List[AudioSfxPlacement] = []
+    try:
+        duration = ffprobe_duration(source) if clip_duration is None else float(clip_duration)
+        if not math.isfinite(duration) or duration <= 0:
+            return AudioMixResult("failed", None, 0, len(sfx_placements), "invalid clip duration")
+        for raw in sfx_placements:
+            try:
+                item = _coerce_sfx_placement(raw)
+                values = (
+                    item.start_seconds, item.end_seconds, item.volume,
+                    item.fade_in_seconds, item.fade_out_seconds,
+                )
+                if (
+                    not item.asset_path.is_file()
+                    or item.placement not in VALID_SFX_PLACEMENTS
+                    or not all(math.isfinite(float(number)) for number in values)
+                    or item.start_seconds < 0
+                    or item.end_seconds <= item.start_seconds
+                    or item.end_seconds > duration
+                    or item.volume < 0
+                    or item.fade_in_seconds < 0
+                    or item.fade_out_seconds < 0
+                ):
+                    discarded += 1
+                    continue
+                candidates.append(item)
+            except (OSError, TypeError, ValueError):
+                discarded += 1
+
+        candidates.sort(key=lambda item: (item.start_seconds, item.end_seconds))
+        accepted: List[AudioSfxPlacement] = []
+        for item in candidates:
+            active = sum(
+                1 for other in accepted
+                if other.start_seconds < item.end_seconds
+                and item.start_seconds < other.end_seconds
+            )
+            if active >= max_layers:
+                discarded += 1
+                continue
+            accepted.append(item)
+
+        if not accepted:
+            if sfx_placements:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                return AudioMixResult("degraded", destination, 0, discarded, "no valid SFX placements")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
+            return AudioMixResult("unchanged", destination, 0, 0)
+
+        has_source_audio = ffprobe_has_audio(source)
+        command: List[str] = ["ffmpeg", "-y", "-i", str(source)]
+        if not has_source_audio:
+            command += ["-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={duration:.3f}"]
+        first_sfx_input = 1 if has_source_audio else 2
+        for item in accepted:
+            command += ["-i", str(item.asset_path)]
+
+        filters: List[str] = []
+        base_input = "[0:a]" if has_source_audio else "[1:a]"
+        filters.append(
+            f"{base_input}aresample=48000, aformat=sample_fmts=fltp:sample_rates=48000:"
+            f"channel_layouts=stereo,atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[base]"
+        )
+        mix_labels = ["[base]"]
+        for offset, item in enumerate(accepted):
+            duration_s = item.end_seconds - item.start_seconds
+            fade_in = min(item.fade_in_seconds, duration_s / 2)
+            fade_out = min(item.fade_out_seconds, duration_s / 2)
+            chain = (
+                f"[{first_sfx_input + offset}:a]atrim=duration={duration_s:.3f},"
+                "asetpts=PTS-STARTPTS,aresample=48000,"
+                f"volume={item.volume:.6f}"
+            )
+            if fade_in > 0:
+                chain += f",afade=t=in:st=0:d={fade_in:.3f}"
+            if fade_out > 0:
+                chain += f",afade=t=out:st={max(0.0, duration_s - fade_out):.3f}:d={fade_out:.3f}"
+            delay_ms = int(round(item.start_seconds * 1000))
+            filters.append(f"{chain},adelay={delay_ms}:all=1[sfx{offset}]")
+            mix_labels.append(f"[sfx{offset}]")
+        # level is omitted: FFmpeg 9.0 made alimiter's `level` a boolean (auto
+        # level, default true), so the old float gain `level=0.95` fails with
+        # "Unable to parse ... as boolean". Omitting it keeps the double default
+        # of 1.0 on pre-9.0 builds and the boolean default true on 9.0+; the
+        # actual ceiling stays on `limit=0.95`, which is a double in all versions.
+        filters.append(
+            f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=first:"
+            "dropout_transition=0:normalize=1,alimiter=limit=0.95[amixed]"
+        )
+        command += [
+            "-filter_complex", ";".join(filters),
+            "-map", "0:v:0", "-map", "[amixed]", "-c:v", "copy",
+            "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", "48000",
+            "-movflags", "+faststart", str(destination),
+        ]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        result = run_ffmpeg_command(command, timeout=1800)
+        if result.returncode != 0 or not destination.is_file() or destination.stat().st_size == 0:
+            destination.unlink(missing_ok=True)
+            return AudioMixResult("failed", None, 0, discarded, "ffmpeg audio mix failed")
+        status = "degraded" if discarded else "mixed"
+        reason = f"discarded {discarded} SFX placement(s)" if discarded else None
+        return AudioMixResult(status, destination, len(accepted), discarded, reason)
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        destination.unlink(missing_ok=True)
+        return AudioMixResult("failed", None, 0, discarded, str(exc))
 
 
 # End-of-clip fade-out (DP-2): the video fade is quantised to 2 frames at

@@ -41,6 +41,7 @@ class TaskRepository:
         font_color: Optional[str] = None,
         caption_template: str = "default",
         include_broll: bool = False,
+        sound_effects_count: int = 0,
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
@@ -58,14 +59,14 @@ class TaskRepository:
             text("""
                 INSERT INTO tasks (
                     id, user_id, source_id, status, font_family, font_size, font_color,
-                    caption_template, include_broll, processing_mode,
+                    caption_template, include_broll, sound_effects_count, processing_mode,
                     output_format, add_subtitles, hook_persist, watermark, watermark_persist,
                     cleanup_settings_json,
                     created_at, updated_at
                 )
                 VALUES (
                     :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
-                    :caption_template, :include_broll, :processing_mode,
+                    :caption_template, :include_broll, :sound_effects_count, :processing_mode,
                     :output_format, :add_subtitles, :hook_persist, :watermark, :watermark_persist,
                     CAST(:cleanup_settings_json AS jsonb),
                     NOW(), NOW()
@@ -82,6 +83,7 @@ class TaskRepository:
                 "font_color": font_color,
                 "caption_template": caption_template,
                 "include_broll": include_broll,
+                "sound_effects_count": max(0, min(5, int(sound_effects_count))),
                 "processing_mode": processing_mode,
                 "output_format": output_format,
                 "add_subtitles": add_subtitles,
@@ -136,6 +138,7 @@ class TaskRepository:
             "font_color": row.font_color,
             "caption_template": row.caption_template,
             "include_broll": row.include_broll,
+            "sound_effects_count": row.sound_effects_count or 0,
             "processing_mode": row.processing_mode,
             "output_format": row.output_format,
             "add_subtitles": row.add_subtitles,
@@ -242,6 +245,7 @@ class TaskRepository:
         font_color: Optional[str],
         caption_template: str,
         include_broll: bool,
+        sound_effects_count: int = 0,
         output_format: str = "vertical",
         add_subtitles: bool = True,
         hook_persist: bool = False,
@@ -265,6 +269,7 @@ class TaskRepository:
                     font_color = :font_color,
                     caption_template = :caption_template,
                     include_broll = :include_broll,
+                    sound_effects_count = :sound_effects_count,
                     output_format = :output_format,
                     add_subtitles = :add_subtitles,
                     hook_persist = :hook_persist,
@@ -282,6 +287,7 @@ class TaskRepository:
                 "font_color": font_color,
                 "caption_template": caption_template,
                 "include_broll": include_broll,
+                "sound_effects_count": max(0, min(5, int(sound_effects_count))),
                 "output_format": output_format,
                 "add_subtitles": add_subtitles,
                 "hook_persist": hook_persist,

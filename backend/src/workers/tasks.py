@@ -61,6 +61,7 @@ async def process_video_task(
     add_subtitles: bool = True,
     hook_persist: bool = False,
     include_broll: bool = False,
+    sound_effects_count: int = 0,
     watermark: Optional[str] = None,
     watermark_persist: bool = False,
     cleanup_settings: Dict[str, Any] | None = None,
@@ -89,12 +90,33 @@ async def process_video_task(
     set_trace_id(f"task-{task_id}")
     logger.info(f"Worker processing task {task_id}")
 
+    try:
+        sound_effects_count = max(0, min(5, int(sound_effects_count)))
+    except (TypeError, ValueError):
+        sound_effects_count = 0
+
     # Create progress tracker
     progress = ProgressTracker(ctx["redis"], task_id)
 
     async with AsyncSessionLocal() as db:
         await load_runtime_settings_cache(db)
         task_service = TaskService(db)
+
+        # The task row is authoritative. This also repairs jobs serialized with
+        # an old/default count before the persisted setting was added.
+        task_repo = getattr(task_service, "task_repo", None)
+        persisted_task = (
+            await task_repo.get_task_by_id(db, task_id)
+            if task_repo is not None
+            else None
+        )
+        if persisted_task and persisted_task.get("sound_effects_count") is not None:
+            try:
+                sound_effects_count = max(
+                    0, min(5, int(persisted_task["sound_effects_count"]))
+                )
+            except (TypeError, ValueError):
+                sound_effects_count = 0
 
         try:
             # Progress callback
@@ -127,6 +149,7 @@ async def process_video_task(
                 add_subtitles=add_subtitles,
                 hook_persist=hook_persist,
                 include_broll=include_broll,
+                sound_effects_count=sound_effects_count,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,

@@ -122,6 +122,7 @@ def _merge_task_source_metadata(
     hook_persist: Any = None,
     watermark: Any = None,
     watermark_persist: Any = None,
+    sound_effects_count: Any = None,
     cleanup_settings: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     merged = dict(existing or {})
@@ -140,6 +141,8 @@ def _merge_task_source_metadata(
         merged["watermark"] = watermark
     if isinstance(watermark_persist, bool):
         merged["watermark_persist"] = watermark_persist
+    if isinstance(sound_effects_count, int) and 0 <= sound_effects_count <= 5:
+        merged["sound_effects_count"] = sound_effects_count
     if cleanup_settings:
         merged.update(cleanup_settings)
 
@@ -169,6 +172,8 @@ PUBLIC_TASK_FIELDS = {
     "clips_count",
     "created_at",
     "updated_at",
+    "sfx_attribution",
+    "sfx_degraded",
 }
 PUBLIC_CLIP_FIELDS = {
     "id",
@@ -188,6 +193,7 @@ PUBLIC_CLIP_FIELDS = {
     "shareability_score",
     "hook_type",
     "hook_title",
+    "sfx",
 }
 
 
@@ -242,6 +248,10 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     font_color = _normalize_font_color(font_options.get("font_color"))
     caption_template = data.get("caption_template", "default")
     include_broll = data.get("include_broll", False)
+    try:
+        sound_effects_count = max(0, min(5, int(data.get("sound_effects_count", 0))))
+    except (TypeError, ValueError):
+        sound_effects_count = 0
     runtime_config = get_config()
     processing_mode = data.get(
         "processing_mode", runtime_config.default_processing_mode
@@ -302,6 +312,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             font_color=font_color,
             caption_template=caption_template,
             include_broll=include_broll,
+            sound_effects_count=sound_effects_count,
             processing_mode=processing_mode,
             output_format=output_format,
             add_subtitles=add_subtitles,
@@ -321,19 +332,19 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         job_id = await queue_adapter.enqueue_processing_job(
             "process_video_task",
             processing_mode,
-            task_id,
-            raw_source["url"],
-            source_type,
-            user_id,
-            font_family,
-            font_size,
-            font_color,
-            caption_template,
-            processing_mode,
-            output_format,
-            add_subtitles,
+            task_id=task_id,
+            url=raw_source["url"],
+            source_type=source_type,
+            user_id=user_id,
+            font_family=font_family,
+            font_size=font_size,
+            font_color=font_color,
+            caption_template=caption_template,
+            output_format=output_format,
+            add_subtitles=add_subtitles,
             hook_persist=hook_persist,
             include_broll=include_broll,
+            sound_effects_count=sound_effects_count,
             watermark=watermark,
             watermark_persist=watermark_persist,
             cleanup_settings=cleanup_settings,
@@ -353,6 +364,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                 watermark=watermark,
                 watermark_persist=watermark_persist,
                 cleanup_settings=cleanup_settings,
+                sound_effects_count=sound_effects_count,
             ),
         )
 
@@ -883,6 +895,10 @@ async def apply_task_settings(
         font_color = _normalize_font_color(payload.get("font_color"))
         caption_template = payload.get("caption_template", "default")
         include_broll = bool(payload.get("include_broll", False))
+        try:
+            sound_effects_count = max(0, min(5, int(payload.get("sound_effects_count", 0))))
+        except (TypeError, ValueError):
+            sound_effects_count = 0
         apply_to_existing = bool(payload.get("apply_to_existing", False))
         cleanup_settings = normalize_clip_cleanup_settings(
             payload.get("cut_long_pauses"),
@@ -896,6 +912,8 @@ async def apply_task_settings(
         task_record = await task_service.task_repo.get_task_by_id(db, task_id)
         if not task_record:
             raise HTTPException(status_code=404, detail="Task not found")
+        if "sound_effects_count" not in payload:
+            sound_effects_count = int(task_record.get("sound_effects_count") or 0)
         if font_family is not None and not is_font_accessible(
             font_family, task_record["user_id"]
         ):
@@ -935,7 +953,8 @@ async def apply_task_settings(
             caption_template,
             include_broll,
             apply_to_existing,
-            cleanup_settings,
+            cleanup_settings=cleanup_settings,
+            sound_effects_count=sound_effects_count,
             output_format=output_format,
             add_subtitles=add_subtitles,
             hook_persist=hook_persist,
@@ -955,6 +974,7 @@ async def apply_task_settings(
                 watermark=task.get("watermark"),
                 watermark_persist=task.get("watermark_persist"),
                 cleanup_settings=cleanup_settings,
+                sound_effects_count=int(task.get("sound_effects_count") or 0),
             ),
         )
         return {"task": task, "message": "Task settings updated"}
@@ -1113,6 +1133,15 @@ async def resume_task(
                     parsed_cleanup.get("filtered_words"),
                 )
 
+        # The task row is authoritative. A missing value is the legacy-task
+        # default; Redis is not allowed to replace a persisted setting.
+        try:
+            sound_effects_count = max(
+                0, min(5, int(task.get("sound_effects_count") or 0))
+            )
+        except (TypeError, ValueError):
+            sound_effects_count = 0
+
         needs_redis = (
             not source_url
             or not source_type
@@ -1143,6 +1172,22 @@ async def resume_task(
                 metadata.get("filtered_words"),
             )
 
+        await _save_task_source_metadata(
+            task_id,
+            _merge_task_source_metadata(
+                metadata,
+                source_url=source_url,
+                source_type=source_type,
+                output_format=output_format,
+                add_subtitles=add_subtitles,
+                hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
+                sound_effects_count=sound_effects_count,
+                cleanup_settings=cleanup_settings,
+            ),
+        )
+
         if not source_url or not source_type:
             raise HTTPException(status_code=400, detail="Task source URL is missing")
 
@@ -1165,19 +1210,19 @@ async def resume_task(
         job_id = await JobQueue.enqueue_processing_job(
             "process_video_task",
             processing_mode,
-            task_id,
-            source_url,
-            source_type,
-            task["user_id"],
-            task.get("font_family"),
-            task.get("font_size"),
-            task.get("font_color"),
-            task.get("caption_template") or "default",
-            processing_mode,
-            output_format,
-            add_subtitles,
+            task_id=task_id,
+            url=source_url,
+            source_type=source_type,
+            user_id=task["user_id"],
+            font_family=task.get("font_family"),
+            font_size=task.get("font_size"),
+            font_color=task.get("font_color"),
+            caption_template=task.get("caption_template") or "default",
+            output_format=output_format,
+            add_subtitles=add_subtitles,
             hook_persist=hook_persist,
             include_broll=bool(task.get("include_broll", False)),
+            sound_effects_count=sound_effects_count,
             watermark=watermark,
             watermark_persist=watermark_persist,
             cleanup_settings=cleanup_settings,

@@ -8,6 +8,7 @@ import logging
 import json
 import subprocess
 import uuid
+import math
 
 from ..utils.async_helpers import run_in_thread
 from ..youtube_utils import (
@@ -29,6 +30,7 @@ from ..video_utils import (
     extend_keep_ranges_to_sentence_boundary,
     load_cached_transcript_data,
     seconds_to_mmss,
+    mix_clip_audio_with_sfx,
 )
 from ..clip_source_map import (
     normalize_source_ranges,
@@ -63,6 +65,125 @@ class VideoService:
             return float(result.stdout.strip())
         except Exception:
             return None
+
+    @staticmethod
+    def _source_to_local_timestamp(timestamp: float, hook_range: tuple[float, float], main_ranges: List[tuple[float, float]], placement: str) -> float | None:
+        """Map source time onto the rendered timeline, including crossfade overlap."""
+        from ..video_utils import crossfade_fade_for_ranges
+
+        ranges = [hook_range, *main_ranges]
+        fade = crossfade_fade_for_ranges(ranges)
+        cursor = 0.0
+        for index, (start, end) in enumerate(ranges):
+            duration = end - start
+            if start <= timestamp < end:
+                if placement == "transition":
+                    return cursor + (max(0.0, duration - fade) if index == 0 else 0.0)
+                return cursor + timestamp - start
+            cursor += duration
+            if index < len(ranges) - 1:
+                cursor -= fade
+        return None
+
+    @staticmethod
+    async def _apply_sound_effects(
+        clip_path: Path,
+        segment: Dict[str, Any],
+        hook_range: tuple[float, float],
+        main_ranges: List[tuple[float, float]],
+        task_id: Optional[str],
+        count: int,
+    ) -> None:
+        payload = {"placements": [], "attribution": [], "degraded": False}
+        if count <= 0 or not task_id:
+            try:
+                clip_path.with_suffix(".sfx.json").write_text(json.dumps(payload), encoding="utf-8")
+            except OSError:
+                logger.warning("SFX sidecar write degraded", exc_info=True)
+            return
+        try:
+            from ..freesound import download_freesound_mp3, search_freesound_sounds
+            from ..sound_effect_cache import (
+                cache_sound_effect,
+                get_cached_sound_effect,
+                write_attribution_manifest,
+                read_attribution_manifest,
+            )
+            work_dir = Path(get_config().temp_dir) / "sfx-downloads" / task_id
+            seen: set[float] = set()
+            private_placements: list[dict[str, Any]] = []
+            opportunities = segment.get("sfx_opportunities") or []
+            for raw in opportunities[:count]:
+                try:
+                    timestamp = parse_timestamp_to_seconds(str(raw["source_timestamp"]))
+                    key = round(timestamp, 3)
+                    if key in seen:
+                        continue
+                    local_start = VideoService._source_to_local_timestamp(
+                        timestamp, hook_range, main_ranges, str(raw.get("placement", "main"))
+                    )
+                    if local_start is None:
+                        continue
+                    seen.add(key)
+                    sounds = await search_freesound_sounds(str(raw["query"]), limit=5)
+                    if not sounds:
+                        payload["degraded"] = True
+                        continue
+                    sound = sounds[0]
+                    cached = get_cached_sound_effect("freesound", sound.id)
+                    if cached is None:
+                        downloaded = await download_freesound_mp3(sound, work_dir / f"{sound.id}.mp3")
+                        cached = cache_sound_effect(sound, downloaded, task_id)
+                    else:
+                        existing = ()
+                        try:
+                            existing = read_attribution_manifest(task_id)
+                        except Exception:
+                            pass
+                        try:
+                            write_attribution_manifest(task_id, (*existing, cached.attribution))
+                        except Exception:
+                            payload["degraded"] = True
+                            logger.warning("SFX attribution write degraded", exc_info=True)
+                    duration = min(float(raw.get("duration", 1.0)), 5.0)
+                    placement = {
+                        "asset_path": str(cached.path),
+                        "start_seconds": max(0.0, local_start),
+                        "end_seconds": max(0.0, local_start) + duration,
+                        "volume": 10 ** (float(raw.get("gain_db", 0.0)) / 20),
+                        "placement": str(raw.get("placement", "main")),
+                    }
+                    payload["placements"].append({
+                        "start_seconds": placement["start_seconds"],
+                        "end_seconds": placement["end_seconds"],
+                        "placement": placement["placement"],
+                        "title": sound.name,
+                        "creator": sound.username,
+                    })
+                    payload["attribution"].append({
+                        "sound_id": str(sound.id), "title": sound.name,
+                        "creator": sound.username, "license": sound.license,
+                        "source_url": sound.url,
+                    })
+                    private_placements.append(placement)
+                except Exception as exc:
+                    payload["degraded"] = True
+                    logger.warning("SFX opportunity degraded: %s", type(exc).__name__)
+            if payload["placements"]:
+                output = clip_path.with_suffix(".sfx.mp4")
+                result = await run_in_thread(mix_clip_audio_with_sfx, clip_path, private_placements, output)
+                if result.output_path and Path(result.output_path).is_file():
+                    clip_path.unlink()
+                    Path(result.output_path).rename(clip_path)
+                else:
+                    payload["degraded"] = True
+        except Exception as exc:
+            payload["degraded"] = True
+            logger.warning("SFX integration degraded: %s", type(exc).__name__)
+        try:
+            clip_path.with_suffix(".sfx.json").write_text(json.dumps(payload), encoding="utf-8")
+        except OSError:
+            logger.warning("SFX sidecar write degraded", exc_info=True)
 
     @staticmethod
     def _hook_range(segment: Dict[str, Any], main_start: float) -> tuple[float, float] | None:
@@ -307,6 +428,7 @@ class VideoService:
         clip_signals: Optional[str] = None,
         include_broll: bool = False,
         visual_signals: Optional[str] = None,
+        max_sfx_count: int = 0,
     ) -> Any:
         """
         Analyze transcript with AI to find relevant segments.
@@ -318,6 +440,7 @@ class VideoService:
             clip_signals=clip_signals,
             include_broll=include_broll,
             visual_signals=visual_signals,
+            max_sfx_count=max_sfx_count,
         )
         logger.info(
             f"AI analysis complete: {len(relevant_parts.most_relevant_segments)} segments found"
@@ -338,6 +461,8 @@ class VideoService:
         hook_persist: bool = False,
         watermark: Optional[str] = None,
         watermark_persist: bool = False,
+        task_id: Optional[str] = None,
+        sound_effects_count: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         Create standalone video clips from segments with optional subtitles.
@@ -385,6 +510,8 @@ class VideoService:
                     hook_persist=hook_persist,
                     watermark=watermark,
                     watermark_persist=watermark_persist,
+                    task_id=task_id,
+                    sound_effects_count=sound_effects_count,
                 )
                 if clip_info is not None:
                     clips_info.append(clip_info)
@@ -408,6 +535,8 @@ class VideoService:
         hook_persist: bool = False,
         watermark: Optional[str] = None,
         watermark_persist: bool = False,
+        task_id: Optional[str] = None,
+        sound_effects_count: int = 0,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
         try:
@@ -499,6 +628,9 @@ class VideoService:
             if broll_final:
                 clip_path.unlink()
                 broll_final.rename(clip_path)
+            await VideoService._apply_sound_effects(
+                clip_path, segment, hook_range, keep_ranges, task_id, sound_effects_count
+            )
             cleaned_duration = sum(end - start for start, end in keep_ranges)
             hook_selection = segment.get("hook_selection")
             is_deterministic_fallback = (
@@ -573,6 +705,7 @@ class VideoService:
         output_format: str = "vertical",
         add_subtitles: bool = True,
         include_broll: bool = False,
+        sound_effects_count: int = 0,
         cached_transcript: Optional[str] = None,
         cached_analysis_json: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
@@ -706,6 +839,7 @@ class VideoService:
                                 self.broll_opportunities = payload.get(
                                     "broll_opportunities"
                                 )
+                                self.sfx_opportunities = payload.get("sfx_opportunities")
 
                         relevant_parts = _SimpleResult(
                             {
@@ -715,6 +849,7 @@ class VideoService:
                                 "broll_opportunities": cached_analysis.get(
                                     "broll_opportunities"
                                 ),
+                                "sfx_opportunities": cached_analysis.get("sfx_opportunities"),
                             }
                         )
                 except Exception:
@@ -748,6 +883,7 @@ class VideoService:
                     transcript,
                     clip_signals=clip_signals,
                     include_broll=include_broll,
+                    max_sfx_count=sound_effects_count,
                     visual_signals=visual_signals,
                 )
 
@@ -782,6 +918,7 @@ class VideoService:
                             "hook_selection": segment.get("hook_selection"),
                         }
                     )
+
                 else:
                     virality = segment.virality.model_dump() if segment.virality else {}
                     segments_json.append(
@@ -807,6 +944,25 @@ class VideoService:
 
             if processing_mode == "fast":
                 segments_json = segments_json[: runtime_config.fast_mode_max_clips]
+
+            sfx_opportunities = [
+                o.model_dump() if hasattr(o, "model_dump") else o
+                for o in (getattr(relevant_parts, "sfx_opportunities", None) or [])
+            ]
+            assigned_sfx: set[float] = set()
+            for segment in segments_json:
+                start = parse_timestamp_to_seconds(str(segment.get("start_time") or "00:00"))
+                end = parse_timestamp_to_seconds(str(segment.get("end_time") or "00:00"))
+                remaining = max(0, min(5, sound_effects_count) - len(assigned_sfx))
+                segment["sfx_opportunities"] = [
+                    opportunity for opportunity in sfx_opportunities
+                    if start <= parse_timestamp_to_seconds(str(opportunity.get("source_timestamp"))) <= end
+                    and round(parse_timestamp_to_seconds(str(opportunity.get("source_timestamp"))), 3) not in assigned_sfx
+                ][:remaining]
+                assigned_sfx.update(
+                    round(parse_timestamp_to_seconds(str(item.get("source_timestamp"))), 3)
+                    for item in segment["sfx_opportunities"]
+                )
 
             if not segments_json:
                 logger.warning(
@@ -850,6 +1006,7 @@ class VideoService:
                         ]
                         if include_broll
                         else [],
+                        "sfx_opportunities": sfx_opportunities,
                     }
                 ),
             }

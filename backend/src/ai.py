@@ -24,7 +24,7 @@ IDEAL_CLIP_MIN_SECONDS = 25
 IDEAL_CLIP_MAX_SECONDS = 50
 MIN_ACCEPTED_CLIP_SECONDS = 15
 MAX_ACCEPTED_CLIP_SECONDS = 60
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "hook-selection-v5"
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "hook-selection-v6-sfx"
 HOOK_TITLE_MAX_CHARS = 64
 HOOK_TITLE_MAX_WORDS = 10
 TRANSCRIPT_SPAN_RE = re.compile(
@@ -188,6 +188,50 @@ class BRollOpportunity(BaseModel):
         return str(value)
 
 
+class SoundEffectOpportunity(BaseModel):
+    """A transcript-grounded opportunity for a non-musical sound effect."""
+
+    source_timestamp: str = Field(
+        validation_alias=AliasChoices("source_timestamp", "timestamp", "start_time"),
+        description="Source-video timestamp in MM:SS or HH:MM:SS format",
+    )
+    duration: float = Field(
+        description="Sound-effect duration in seconds",
+        ge=0.2,
+        le=5.0,
+    )
+    query: str = Field(
+        validation_alias=AliasChoices("query", "sound_effect", "search_term"),
+        description="Search query for a non-musical sound effect",
+    )
+    context: str = Field(description="Transcript-grounded reason the effect helps")
+    intensity: Literal["subtle", "moderate", "strong"] = Field(
+        description="Perceptual intensity of the sound effect"
+    )
+    gain_db: float = Field(
+        description="Playback gain in decibels",
+        ge=-24.0,
+        le=6.0,
+    )
+    placement: Literal["hook", "transition", "main"] = Field(
+        description="Clip placement: hook, transition, or main"
+    )
+
+    @field_validator("source_timestamp", "query", "context", mode="before")
+    @classmethod
+    def _coerce_required_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @field_validator("query")
+    @classmethod
+    def _require_query(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Sound-effect query must not be empty")
+        return value
+
+
 class TranscriptAnalysis(BaseModel):
     """Analysis result for transcript segments with virality and B-roll opportunities."""
 
@@ -196,6 +240,10 @@ class TranscriptAnalysis(BaseModel):
     key_topics: List[str] = Field(description="List of main topics discussed")
     broll_opportunities: Optional[List[BRollOpportunity]] = Field(
         default=None, description="Opportunities to insert B-roll footage"
+    )
+    sfx_opportunities: Optional[List[SoundEffectOpportunity]] = Field(
+        default=None,
+        description="Optional transcript-grounded non-musical sound-effect opportunities",
     )
 
 
@@ -208,6 +256,8 @@ OUTPUT CONTRACT:
 - Return valid JSON only. Do not output Markdown, headings, bullets, prose, code fences, explanations, or commentary outside the JSON object.
 - The top-level JSON object must include: "most_relevant_segments", "summary", and "key_topics".
 - Only include "broll_opportunities" when B-roll was requested.
+- Never suggest music, copyrighted song snippets, or any other song excerpt. Sound effects are optional and must be used only when they improve attention or comprehension; never force an opportunity.
+- Sound effects may be placed only in Hook, Transition, or Main, and must be grounded in the supplied source timestamps.
 - Each item in "most_relevant_segments" must include: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", "hook_selection", and "hook_title".
 - "hook_selection" is mandatory and more important than "hook_title": choose a source-video moment before the main segment, not a written headline.
 - "hook_selection" must include "hook_start_time", "hook_end_time", "transcript_evidence", "reasoning", and "hook_score".
@@ -454,14 +504,28 @@ def build_transcript_analysis_prompt(
     include_broll: bool = False,
     clip_signals: str | None = None,
     visual_signals: str | None = None,
+    max_sfx_count: int = 0,
 ) -> str:
     """Build the grounded task prompt for transcript analysis."""
+    if max_sfx_count < 0:
+        raise ValueError("max_sfx_count must be greater than or equal to zero")
+
     broll_instruction = ""
     if include_broll:
         broll_instruction = (
             "\n5. Also identify B-roll opportunities for each chosen segment where stock footage could enhance the visual appeal. "
             "Each opportunity's \"timestamp\" must be an absolute source-video time in MM:SS format, "
             "inside that segment's start_time-end_time range."
+        )
+    sfx_instruction = ""
+    if max_sfx_count:
+        sfx_instruction = (
+            f"\n6. Optionally identify at most {max_sfx_count} sound-effect opportunities total. "
+            "Return fewer, including none, when an effect would not improve attention or comprehension. "
+            "Use only non-musical sound effects; never use music, copyrighted song snippets, or song excerpts. "
+            "Each item must include source_timestamp, duration (0.2-5.0 seconds), query, context, "
+            "intensity (subtle, moderate, or strong), gain_db (-24 to 6 dB), and placement "
+            "(hook, transition, or main). The source_timestamp must be grounded in a supplied transcript timestamp."
         )
     signal_section = ""
     if clip_signals:
@@ -481,6 +545,13 @@ def build_transcript_analysis_prompt(
             "with high face presence and few internal cuts. The final segment must still "
             "be a coherent contiguous transcript range."
         )
+    sfx_json_contract = (
+        '- When requested, "sfx_opportunities" items must contain '
+        '"source_timestamp", "duration", "query", "context", "intensity", '
+        '"gain_db", and "placement".'
+        if max_sfx_count
+        else ""
+    )
 
     return f"""Analyze this video transcript and identify the most engaging segments for short-form content.
 
@@ -492,7 +563,7 @@ Follow this workflow:
 1. Read the transcript as a sequence of timestamped spans.
 2. Select only contiguous ranges that already exist in the transcript.
 3. Prefer moments with a strong hook, clear payoff, emotional charge, or concrete value.
-4. For each chosen segment, use the earliest timestamp in the selected range as start_time and the latest timestamp in the selected range as end_time.{broll_instruction}
+4. For each chosen segment, use the earliest timestamp in the selected range as start_time and the latest timestamp in the selected range as end_time.{broll_instruction}{sfx_instruction}
 
 Selection target:
 - Choose 2-5 segments total.
@@ -517,8 +588,9 @@ Critical accuracy requirements:
 JSON-only output requirements:
 - Return one valid JSON object and nothing else.
 - No Markdown, headings, bullets, code fences, or explanatory text outside JSON.
-- Top-level keys: "most_relevant_segments", "summary", "key_topics"{', "broll_opportunities"' if include_broll else ''}.
+- Top-level keys: "most_relevant_segments", "summary", "key_topics"{', "broll_opportunities"' if include_broll else ''}{', "sfx_opportunities"' if max_sfx_count else ''}.
 - Segment keys: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", "hook_selection", "hook_title".
+{sfx_json_contract}
 - "hook_selection" is mandatory and more important than "hook_title". It must contain "hook_start_time", "hook_end_time", "transcript_evidence", "reasoning", and "hook_score".
 - The hook must be a source-video moment before the main segment, 1-5 seconds inclusive, and grounded in the supplied transcript.
 - "hook_title" is a 3-9 word plain-text headline for the clip, grounded in the segment (no hashtags, emojis, or quotes).
@@ -708,6 +780,47 @@ def _validate_or_repair_hook_selection(
     return repaired_hook
 
 
+def _validate_sound_effect_opportunities(
+    opportunities: Optional[list[SoundEffectOpportunity]],
+    transcript_spans: list[dict[str, Any]],
+    max_sfx_count: int,
+) -> Optional[list[SoundEffectOpportunity]]:
+    """Keep only bounded effects whose trigger timestamp exists in the source."""
+    if max_sfx_count < 0:
+        raise ValueError("max_sfx_count must be greater than or equal to zero")
+    if max_sfx_count == 0 or not opportunities:
+        return None
+
+    validated: list[SoundEffectOpportunity] = []
+    for opportunity in opportunities:
+        try:
+            timestamp_seconds = _parse_transcript_timestamp_seconds(
+                opportunity.source_timestamp
+            )
+            grounded = any(
+                int(span["start"]) <= timestamp_seconds < int(span["end"])
+                for span in transcript_spans
+            )
+            if not grounded:
+                logger.warning(
+                    "Skipping sound effect with source timestamp outside transcript: %s",
+                    opportunity.source_timestamp,
+                )
+                continue
+
+            opportunity.source_timestamp = _format_transcript_timestamp(
+                timestamp_seconds
+            )
+            validated.append(opportunity)
+        except (ValueError, IndexError, AttributeError) as exc:
+            logger.warning("Skipping invalid sound-effect opportunity: %s", exc)
+
+        if len(validated) >= max_sfx_count:
+            break
+
+    return validated or None
+
+
 def _choose_repaired_bounds(
     transcript_spans: list[dict[str, Any]], start_seconds: int, end_seconds: int
 ) -> tuple[int, int] | None:
@@ -815,10 +928,14 @@ async def get_most_relevant_parts_by_transcript(
     include_broll: bool = False,
     clip_signals: str | None = None,
     visual_signals: str | None = None,
+    max_sfx_count: int = 0,
 ) -> TranscriptAnalysis:
     """Get the most relevant parts of a transcript with virality scoring and optional B-roll detection."""
+    if max_sfx_count < 0:
+        raise ValueError("max_sfx_count must be greater than or equal to zero")
     logger.info(
-        f"Starting AI analysis of transcript ({len(transcript)} chars), include_broll={include_broll}"
+        f"Starting AI analysis of transcript ({len(transcript)} chars), "
+        f"include_broll={include_broll}, max_sfx_count={max_sfx_count}"
     )
 
     try:
@@ -830,6 +947,7 @@ async def get_most_relevant_parts_by_transcript(
                 include_broll=include_broll,
                 clip_signals=clip_signals,
                 visual_signals=visual_signals,
+                max_sfx_count=max_sfx_count,
             )
         )
 
@@ -841,6 +959,11 @@ async def get_most_relevant_parts_by_transcript(
         # Validation with virality data handling
         validated_segments = []
         transcript_spans = _parse_transcript_spans(transcript)
+        validated_sfx_opportunities = _validate_sound_effect_opportunities(
+            analysis.sfx_opportunities,
+            transcript_spans,
+            max_sfx_count,
+        )
         for segment in analysis.most_relevant_segments:
             # Validate text content
             if not segment.text.strip() or len(segment.text.split()) < 3:
@@ -954,6 +1077,7 @@ async def get_most_relevant_parts_by_transcript(
             summary=analysis.summary,
             key_topics=analysis.key_topics,
             broll_opportunities=analysis.broll_opportunities if include_broll else None,
+            sfx_opportunities=validated_sfx_opportunities,
         )
 
         logger.info(f"Selected {len(validated_segments)} segments for processing")

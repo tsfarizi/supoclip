@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,24 @@ from uuid import uuid4
 
 TRACE_HEADER = "x-trace-id"
 _trace_id_ctx: ContextVar[str] = ContextVar("trace_id", default="-")
+
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(bearer\s+|token\s+|api[-_ ]?key\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"(?i)([?&](?:api[-_]?key|access[-_]?token|token|key)=)[^&\s]+"),
+    re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+)
+
+
+def redact_secrets(value: str) -> str:
+    """Remove credential-shaped data and configured secret values from log text."""
+    redacted = value
+    for secret_name, secret_value in os.environ.items():
+        if secret_value and any(marker in secret_name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+            redacted = redacted.replace(secret_value, "[REDACTED]")
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(lambda match: f"{match.group(1) if match.lastindex else ''}[REDACTED]", redacted)
+    return redacted
 
 
 def get_trace_id() -> str:
@@ -40,12 +59,12 @@ class JsonLogFormatter(logging.Formatter):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_secrets(record.getMessage()),
             "trace_id": getattr(record, "trace_id", "-"),
         }
 
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_secrets(self.formatException(record.exc_info))
 
         return json.dumps(payload, ensure_ascii=True)
 

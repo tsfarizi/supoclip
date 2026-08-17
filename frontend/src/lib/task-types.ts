@@ -52,6 +52,9 @@ export interface TaskDetails {
   remove_filler_words?: boolean;
   filtered_words?: string[];
   include_broll?: boolean;
+  sound_effects_count?: number;
+  sfx_attribution?: Array<{ sound_id: string; title: string; creator: string; license: string; source_url: string }>;
+  sfx_degraded?: boolean;
   share_enabled?: boolean;
 }
 

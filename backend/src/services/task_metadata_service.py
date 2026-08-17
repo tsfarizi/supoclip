@@ -63,6 +63,7 @@ class TaskMetadataService:
             "hook_persist": False,
             "watermark": None,
             "watermark_persist": False,
+            "sound_effects_count": 0,
             **normalize_clip_cleanup_settings(),
         }
 
@@ -72,6 +73,7 @@ class TaskMetadataService:
         watermark = task.get("watermark")
         watermark_persist = task.get("watermark_persist")
         cleanup_settings_json = task.get("cleanup_settings_json")
+        sound_effects_count = task.get("sound_effects_count")
 
         needs_redis = (
             output_format is None
@@ -140,6 +142,11 @@ class TaskMetadataService:
         elif not isinstance(watermark_persist, bool):
             watermark_persist = defaults["watermark_persist"]
 
+        try:
+            sound_effects_count = max(0, min(5, int(sound_effects_count or 0)))
+        except (TypeError, ValueError):
+            sound_effects_count = defaults["sound_effects_count"]
+
         cleanup_payload: Dict[str, Any] = {}
         if cleanup_settings_json is not None:
             # asyncpg 0.31 decodes the jsonb column to a dict natively, so the
@@ -163,6 +170,7 @@ class TaskMetadataService:
             "hook_persist": hook_persist,
             "watermark": watermark,
             "watermark_persist": watermark_persist,
+            "sound_effects_count": sound_effects_count,
             **normalize_clip_cleanup_settings(
                 cleanup_payload.get("cut_long_pauses"),
                 cleanup_payload.get("pause_threshold_ms"),

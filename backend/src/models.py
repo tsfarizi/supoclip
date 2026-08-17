@@ -119,6 +119,12 @@ class RevenueCatWebhookEvent(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "sound_effects_count >= 0 AND sound_effects_count <= 5",
+            name="tasks_sound_effects_count_range",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=generate_uuid_string
@@ -157,6 +163,9 @@ class Task(Base):
     )
     include_broll: Mapped[Optional[bool]] = mapped_column(
         Boolean, nullable=True, server_default=sql_text("'false'")
+    )
+    sound_effects_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=sql_text("'0'")
     )
     processing_mode: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=sql_text("'fast'")
@@ -287,6 +296,7 @@ class ProcessingCache(Base):
     video_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     transcript_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     analysis_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sound_effects_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

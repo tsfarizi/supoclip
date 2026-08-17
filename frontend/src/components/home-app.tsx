@@ -232,6 +232,7 @@ export default function HomeApp() {
   const [watermark, setWatermark] = useState("");
   const [watermarkPersist, setWatermarkPersist] = useState(false);
   const [includeBroll, setIncludeBroll] = useState(false);
+  const [soundEffectsCount, setSoundEffectsCount] = useState(0);
   const [pexelsConfigured, setPexelsConfigured] = useState<boolean | null>(null);
   const [cutLongPauses, setCutLongPauses] = useState(false);
   const [pauseThresholdMs, setPauseThresholdMs] = useState("900");
@@ -585,6 +586,7 @@ export default function HomeApp() {
           watermark: watermark,
           watermark_persist: watermarkPersist,
           include_broll: includeBroll,
+          sound_effects_count: soundEffectsCount,
           cut_long_pauses: cutLongPauses,
           pause_threshold_ms: normalizedPauseThreshold,
           remove_filler_words: removeFillerWords,
@@ -611,6 +613,7 @@ export default function HomeApp() {
         watermark: watermark,
         watermark_persist: watermarkPersist,
         include_broll: includeBroll,
+        sound_effects_count: soundEffectsCount,
         cut_long_pauses: cutLongPauses,
         pause_threshold_ms: normalizedPauseThreshold,
         remove_filler_words: removeFillerWords,
@@ -1171,6 +1174,20 @@ export default function HomeApp() {
                         disabled={generationControlsDisabled}
                       />
                     </div>
+                  </div>
+
+                  {/* Sound effects */}
+                  <div className="rounded-lg border bg-stone-50 p-3 space-y-2">
+                    <div>
+                      <h3 className="text-sm font-medium text-stone-900">Sound effects</h3>
+                      <p className="text-xs text-stone-500">Add transcript-grounded effects from Freesound.</p>
+                    </div>
+                    <Select value={String(soundEffectsCount)} onValueChange={(value) => setSoundEffectsCount(Number(value))} disabled={generationControlsDisabled}>
+                      <SelectTrigger className="bg-white"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {[0, 1, 2, 3, 4, 5].map((count) => <SelectItem key={count} value={String(count)}>{count === 0 ? "Off" : String(count)}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
                   </div>
 
                   {/* B-roll footage */}

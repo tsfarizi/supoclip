@@ -95,10 +95,11 @@ class TaskService:
 
     @staticmethod
     def _build_cache_key(
-        url: str, source_type: str, processing_mode: str, include_broll: bool = False
+        url: str, source_type: str, processing_mode: str, include_broll: bool = False,
+        sound_effects_count: int = 0,
     ) -> str:
         payload = (
-            f"{source_type}|{processing_mode}|{int(include_broll)}|"
+            f"{source_type}|{processing_mode}|{int(include_broll)}|{max(0, min(5, int(sound_effects_count)))}|"
             f"{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{url.strip()}"
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -132,6 +133,7 @@ class TaskService:
         font_color: Optional[str] = None,
         caption_template: str = "default",
         include_broll: bool = False,
+        sound_effects_count: int = 0,
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
@@ -174,6 +176,7 @@ class TaskService:
             font_color=font_color,
             caption_template=caption_template,
             include_broll=include_broll,
+            sound_effects_count=sound_effects_count,
             processing_mode=processing_mode,
             output_format=output_format,
             add_subtitles=add_subtitles,
@@ -213,6 +216,7 @@ class TaskService:
         add_subtitles: bool = True,
         hook_persist: bool = False,
         include_broll: bool = False,
+        sound_effects_count: int = 0,
         progress_callback: Optional[Callable] = None,
         should_cancel: Optional[Callable] = None,
         clip_ready_callback: Optional[Callable] = None,
@@ -225,11 +229,15 @@ class TaskService:
         Returns processing results.
         """
         try:
+            try:
+                sound_effects_count = max(0, min(5, int(sound_effects_count)))
+            except (TypeError, ValueError):
+                sound_effects_count = 0
             logger.info(f"Starting processing for task {task_id}")
             started_at = datetime.utcnow()
             stage_timings: Dict[str, float] = {}
             cache_key = self._build_cache_key(
-                url, source_type, processing_mode, include_broll
+                url, source_type, processing_mode, include_broll, sound_effects_count
             )
 
             cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
@@ -285,6 +293,7 @@ class TaskService:
                 output_format=output_format,
                 add_subtitles=add_subtitles,
                 include_broll=include_broll,
+                sound_effects_count=sound_effects_count,
                 cached_transcript=cached_transcript,
                 cached_analysis_json=cached_analysis_json,
                 progress_callback=update_progress,
@@ -309,6 +318,7 @@ class TaskService:
                     video_path=result.get("video_path"),
                     transcript_text=result.get("transcript"),
                     analysis_json=None,
+                    sound_effects_count=sound_effects_count,
                 )
                 raise ValueError(
                     "No usable clip segments were selected for this video."
@@ -322,6 +332,7 @@ class TaskService:
                 video_path=result.get("video_path"),
                 transcript_text=result.get("transcript"),
                 analysis_json=result.get("analysis_json"),
+                sound_effects_count=sound_effects_count,
             )
 
             video_path = Path(result["video_path"])
@@ -362,6 +373,8 @@ class TaskService:
                     hook_persist=hook_persist,
                     watermark=watermark,
                     watermark_persist=watermark_persist,
+                    task_id=task_id,
+                    sound_effects_count=sound_effects_count,
                 )
                 if clip_info is None:
                     continue  # Skip failed clip
@@ -621,6 +634,25 @@ class TaskService:
         ]
         task["clips_count"] = len(clips)
         task.update(await self._load_task_source_settings(task))
+        task["sfx_attribution"] = []
+        task["sfx_degraded"] = False
+        for clip_record, clip in zip(clips, task["clips"]):
+            sidecar = Path(clip_record["file_path"]).with_suffix(".sfx.json")
+            try:
+                payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                clip["sfx"] = payload.get("placements", [])
+                task["sfx_degraded"] = task["sfx_degraded"] or bool(payload.get("degraded"))
+        try:
+            from ..sound_effect_cache import read_attribution_manifest
+            task["sfx_attribution"] = [
+                {key: value for key, value in asset.__dict__.items() if key != "local_mp3_path"}
+                for asset in read_attribution_manifest(task_id)
+            ]
+        except Exception:
+            pass
 
         return task
 
@@ -714,6 +746,7 @@ class TaskService:
         caption_template: str,
         include_broll: bool,
         apply_to_existing: bool,
+        sound_effects_count: int = 0,
         cleanup_settings: Optional[Dict[str, Any]] = None,
         output_format: str = "vertical",
         add_subtitles: bool = True,
@@ -730,6 +763,7 @@ class TaskService:
             font_color,
             caption_template,
             include_broll,
+            sound_effects_count=sound_effects_count,
             output_format=output_format,
             add_subtitles=add_subtitles,
             hook_persist=hook_persist,
@@ -747,6 +781,7 @@ class TaskService:
                 caption_template,
                 cleanup_settings=cleanup_settings,
                 include_broll=include_broll,
+                sound_effects_count=sound_effects_count,
             )
 
         return await self.get_task_with_clips(task_id) or {}
@@ -760,6 +795,7 @@ class TaskService:
         caption_template: str,
         cleanup_settings: Optional[Dict[str, Any]] = None,
         include_broll: bool = False,
+        sound_effects_count: int = 0,
     ) -> None:
         """Regenerate all clips in a task using existing segment boundaries."""
         task = await self.task_repo.get_task_by_id(self.db, task_id)
@@ -770,6 +806,12 @@ class TaskService:
         source_type = task.get("source_type")
         metadata = await self._load_task_source_settings(task)
         output_format = metadata.get("output_format", "vertical")
+        persisted_sound_effects_count = task.get("sound_effects_count")
+        if persisted_sound_effects_count is None:
+            persisted_sound_effects_count = sound_effects_count
+        sound_effects_count = max(
+            0, min(5, int(persisted_sound_effects_count))
+        )
         add_subtitles = metadata.get("add_subtitles", True)
         hook_persist = metadata.get("hook_persist", False)
         watermark = metadata.get("watermark")
@@ -846,6 +888,7 @@ class TaskService:
                     "shareability_score": clip.get("shareability_score", 0),
                     "hook_type": clip.get("hook_type"),
                     "hook_title": clip.get("hook_title"),
+                    "sfx_opportunities": [],
                     **(
                         {"hook_selection": {
                             "hook_start_time": self._seconds_to_mmss(manifest["hook_range"][0]),
@@ -877,6 +920,8 @@ class TaskService:
             add_subtitles,
             normalized_cleanup_settings,
             hook_persist=hook_persist,
+            task_id=task_id,
+            sound_effects_count=sound_effects_count,
             watermark=watermark,
             watermark_persist=watermark_persist,
         )

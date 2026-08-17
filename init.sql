@@ -63,6 +63,7 @@ CREATE TABLE tasks (
     -- Caption template and B-roll options
     caption_template VARCHAR(50) DEFAULT 'default',
     include_broll BOOLEAN DEFAULT false,
+    sound_effects_count INTEGER NOT NULL DEFAULT 0 CHECK (sound_effects_count >= 0 AND sound_effects_count <= 5),
     hook_persist BOOLEAN NOT NULL DEFAULT false,
     watermark TEXT,
     watermark_persist BOOLEAN NOT NULL DEFAULT false,
@@ -114,6 +115,7 @@ CREATE TABLE processing_cache (
     video_path TEXT,
     transcript_text TEXT,
     analysis_json TEXT,
+    sound_effects_count INTEGER NOT NULL DEFAULT 0 CHECK (sound_effects_count >= 0 AND sound_effects_count <= 5),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

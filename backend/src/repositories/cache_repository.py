@@ -14,7 +14,7 @@ class CacheRepository:
         result = await db.execute(
             text(
                 """
-                SELECT cache_key, source_url, source_type, video_path, transcript_text, analysis_json
+                SELECT cache_key, source_url, source_type, video_path, transcript_text, analysis_json, sound_effects_count
                 FROM processing_cache
                 WHERE cache_key = :cache_key
                 """
@@ -32,6 +32,7 @@ class CacheRepository:
             "video_path": row.video_path,
             "transcript_text": row.transcript_text,
             "analysis_json": row.analysis_json,
+            "sound_effects_count": row.sound_effects_count or 0,
         }
 
     @staticmethod
@@ -43,15 +44,16 @@ class CacheRepository:
         video_path: Optional[str] = None,
         transcript_text: Optional[str] = None,
         analysis_json: Optional[str] = None,
+        sound_effects_count: int = 0,
     ) -> None:
         await db.execute(
             text(
                 """
                 INSERT INTO processing_cache (
-                    cache_key, source_url, source_type, video_path, transcript_text, analysis_json, created_at, updated_at
+                    cache_key, source_url, source_type, video_path, transcript_text, analysis_json, sound_effects_count, created_at, updated_at
                 )
                 VALUES (
-                    :cache_key, :source_url, :source_type, :video_path, :transcript_text, :analysis_json, NOW(), NOW()
+                    :cache_key, :source_url, :source_type, :video_path, :transcript_text, :analysis_json, :sound_effects_count, NOW(), NOW()
                 )
                 ON CONFLICT (cache_key)
                 DO UPDATE SET
@@ -60,6 +62,7 @@ class CacheRepository:
                     video_path = COALESCE(EXCLUDED.video_path, processing_cache.video_path),
                     transcript_text = COALESCE(EXCLUDED.transcript_text, processing_cache.transcript_text),
                     analysis_json = COALESCE(EXCLUDED.analysis_json, processing_cache.analysis_json),
+                    sound_effects_count = EXCLUDED.sound_effects_count,
                     updated_at = NOW()
                 """
             ),
@@ -70,6 +73,7 @@ class CacheRepository:
                 "video_path": video_path,
                 "transcript_text": transcript_text,
                 "analysis_json": analysis_json,
+                "sound_effects_count": max(0, min(5, int(sound_effects_count))),
             },
         )
         await db.commit()

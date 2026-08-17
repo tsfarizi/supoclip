@@ -105,6 +105,10 @@ interface TaskDetails {
   pause_threshold_ms?: number;
   remove_filler_words?: boolean;
   filtered_words?: string[];
+  include_broll?: boolean;
+  sound_effects_count?: number;
+  sfx_attribution?: Array<{ sound_id: string; title: string; creator: string; license: string; source_url: string }>;
+  sfx_degraded?: boolean;
   share_enabled?: boolean;
 }
 
@@ -141,6 +145,7 @@ export default function TaskPage() {
   const [projectFontColor, setProjectFontColor] = useState<string | null>(null);
   const [projectCaptionTemplate, setProjectCaptionTemplate] = useState("default");
   const [projectIncludeBroll, setProjectIncludeBroll] = useState(false);
+  const [projectSoundEffectsCount, setProjectSoundEffectsCount] = useState(0);
   const [projectCutLongPauses, setProjectCutLongPauses] = useState(false);
   const [projectPauseThresholdMs, setProjectPauseThresholdMs] = useState("900");
   const [projectRemoveFillerWords, setProjectRemoveFillerWords] = useState(false);
@@ -201,6 +206,7 @@ export default function TaskPage() {
         setProjectFontColor(taskData.font_color ?? null);
         setProjectCaptionTemplate(taskData.caption_template || "default");
         setProjectIncludeBroll(Boolean(taskData.include_broll));
+        setProjectSoundEffectsCount(Number(taskData.sound_effects_count || 0));
         setProjectCutLongPauses(Boolean(taskData.cut_long_pauses));
         setProjectPauseThresholdMs(String(taskData.pause_threshold_ms || 900));
         setProjectRemoveFillerWords(Boolean(taskData.remove_filler_words));
@@ -571,6 +577,7 @@ export default function TaskPage() {
           ...fontOptions,
           caption_template: projectCaptionTemplate,
           include_broll: projectIncludeBroll,
+          sound_effects_count: projectSoundEffectsCount,
           cut_long_pauses: projectCutLongPauses,
           pause_threshold_ms: safePauseThreshold,
           remove_filler_words: projectRemoveFillerWords,
@@ -1204,6 +1211,19 @@ export default function TaskPage() {
                           </SelectItem>
                         ))}
                         {availableTemplates.length === 0 && <SelectItem value="default">Default</SelectItem>}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="rounded-lg border bg-gray-50 p-3 space-y-2">
+                    <div>
+                      <div className="text-sm font-medium text-gray-900">Sound effects</div>
+                      <div className="text-xs text-gray-500">Add transcript-grounded effects from Freesound.</div>
+                    </div>
+                    <Select value={String(projectSoundEffectsCount)} onValueChange={(value) => setProjectSoundEffectsCount(Number(value))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {[0, 1, 2, 3, 4, 5].map((count) => <SelectItem key={count} value={String(count)}>{count === 0 ? "Off" : String(count)}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </div>

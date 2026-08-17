@@ -34,6 +34,7 @@ class Config:
         self.transcript_provider = os.getenv("TRANSCRIPT_PROVIDER", "assemblyai").strip().lower()
         self.asr_base_url = os.getenv("ASR_BASE_URL", "http://localhost:8765").rstrip("/")
         self.pexels_api_key = self._get_runtime_setting("PEXELS_API_KEY")
+        self.freesound_api_key = self._get_runtime_setting("FREESOUND_API_KEY")
         self.apify_api_token = self._get_runtime_setting("APIFY_API_TOKEN")
         self.youtube_download_provider = self._normalize_youtube_download_provider(
             os.getenv("YOUTUBE_DOWNLOAD_PROVIDER", "yt_dlp")
@@ -173,6 +174,7 @@ class Config:
             "YOUTUBE_DATA_API_KEY": self.youtube_data_api_key,
             "APIFY_API_TOKEN": self.apify_api_token,
             "PEXELS_API_KEY": self.pexels_api_key,
+            "FREESOUND_API_KEY": self.freesound_api_key,
         }
 
     @staticmethod

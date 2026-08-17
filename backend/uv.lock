@@ -4021,6 +4021,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "greenlet" },
+    { name = "httpx" },
     { name = "numpy" },
     { name = "opencv-python" },
     { name = "pydantic-ai" },
@@ -4043,7 +4044,6 @@ cv = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -4061,6 +4061,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastapi", specifier = ">=0.121.0" },
     { name = "greenlet", specifier = ">=2.0.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mediapipe", marker = "extra == 'cv'", specifier = ">=0.10.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "opencv-python", specifier = ">=4.8.0" },
@@ -4080,7 +4081,6 @@ provides-extras = ["cv"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=1.2.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },

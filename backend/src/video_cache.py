@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -118,6 +119,27 @@ def _read_sidecar(video_id: str) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("Video cache sidecar unreadable for %s: %s", video_id, exc)
         return None
+    if not isinstance(payload, dict):
+        logger.warning("Video cache sidecar has invalid structure for %s", video_id)
+        return None
+
+    numeric_fields = ("fetched_at", "last_access", "duration_seconds", "width", "height")
+    for field in numeric_fields:
+        if field not in payload or payload[field] is None:
+            continue
+        value = payload[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            logger.warning("Video cache sidecar has invalid %s for %s", field, video_id)
+            return None
+        if isinstance(value, float) and not math.isfinite(value):
+            logger.warning("Video cache sidecar has invalid %s for %s", field, video_id)
+            return None
+        if field in {"fetched_at", "last_access", "duration_seconds"} and value < 0:
+            logger.warning("Video cache sidecar has invalid %s for %s", field, video_id)
+            return None
+        if field in {"width", "height"} and (not isinstance(value, int) or value <= 0):
+            logger.warning("Video cache sidecar has invalid %s for %s", field, video_id)
+            return None
     return payload
 
 
