@@ -10,6 +10,12 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: false,
   },
+  // Node 22 + webpack 5 wasm hash crash ("Cannot read properties of undefined
+  // (reading 'length')" at WasmHash._updateWithBuffer). Run webpack in-process
+  // instead of the worker thread so `next build` is deterministic on Windows.
+  experimental: {
+    webpackBuildWorker: false,
+  },
   async rewrites() {
     return [
       {

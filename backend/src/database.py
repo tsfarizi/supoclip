@@ -68,9 +68,25 @@ class Base(DeclarativeBase):
     pass
 
 
+def _normalize_async_database_url(database_url: str) -> str:
+    """Force the asyncpg driver for async engines.
+
+    A plain ``postgresql://``/``postgres://`` URL makes SQLAlchemy import the
+    sync psycopg2 dialect, which is not installed (and never should be for an
+    async engine). An inherited DATABASE_URL (e.g. leftover from run.ps1's
+    Prisma step, which strips ``+asyncpg``) silently overrides the root .env,
+    so normalize at the engine boundary instead of trusting the caller.
+    """
+    if database_url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + database_url[len("postgresql://") :]
+    if database_url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + database_url[len("postgres://") :]
+    return database_url
+
+
 def _build_engine(database_url: str) -> AsyncEngine:
     return create_async_engine(
-        database_url,
+        _normalize_async_database_url(database_url),
         echo=False,
         pool_size=10,
         max_overflow=20,

@@ -38,6 +38,8 @@ load_dotenv()
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql+asyncpg://localhost:5432/supoclip"
 )
+if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL.split("://", 1)[1]
 REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
