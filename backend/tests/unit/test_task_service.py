@@ -8,7 +8,13 @@ import pytest
 
 from src.config import Config
 from src.ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
-from src.errors import RenderError
+from src.errors import (
+    AnalysisError,
+    CancelledError,
+    DownloadError,
+    RenderError,
+    TranscriptionError,
+)
 from src.services import task_service as task_service_module
 from src.services.task_service import TaskService
 from src.workers.tasks import sweep_stale_queued_tasks
@@ -72,7 +78,6 @@ def build_task_service() -> TaskService:
     service.cache_repo.upsert_cache = AsyncMock()
     service.task_repo.update_task_runtime_metadata = AsyncMock()
     service.task_repo.update_task_status = AsyncMock()
-    service.task_repo.update_task_clips = AsyncMock()
     service.clip_repo.create_clip = AsyncMock(return_value="clip-1")
     service.video_service.create_single_clip = AsyncMock(return_value=build_clip_result())
     service.video_service.apply_single_transition = AsyncMock(
@@ -218,6 +223,7 @@ async def test_process_task_fails_when_no_clip_segments_are_selected():
         service.db,
         "task-1",
         "error",
+        expected_statuses=["queued", "processing"],
         progress=0,
         progress_message="No usable clip segments were selected for this video.",
     )
@@ -417,6 +423,10 @@ async def test_process_task_all_clip_renders_fail_marks_error_not_completed():
         status_calls.append(
             _kwargs.get("status", _args[2] if len(_args) > 2 else None)
         )
+        # CAS contract: every status write in this scenario wins, so the
+        # terminal "error" transition is accepted and the error_code metadata
+        # write that follows it actually happens.
+        return True
 
     service.task_repo.update_task_status = AsyncMock(side_effect=record_status)
 
@@ -540,55 +550,156 @@ async def test_process_task_skips_completion_email_when_already_sent(monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Characterization: process_task error_code mapping (A11 contract, current
-# string-matching behavior in task_service.py except block).
+# Falsification: process_task error_code mapping (A11 contract, typed
+# taxonomy). error_code derives from the exception TYPE, never from message
+# text: DownloadError -> download_error, TranscriptionError ->
+# transcription_error, AnalysisError -> analysis_error, RenderError ->
+# task_error, CancelledError -> cancelled (with no error_code written). A
+# generic exception - whatever its message - freezes to task_error; the
+# string-matching fallback was removed.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "message,expected_code",
+    "exc_type,message,expected_status,expected_progress_message,expected_error_code",
     [
-        # primary keywords
-        ("Failed to download video", "download_error"),
-        ("YouTube video could not be fetched", "download_error"),
-        ("Analysis step failed", "analysis_error"),
-        ("Transcript generation failed", "transcription_error"),
-        ("User cancelled the operation", "cancelled"),
-        ("Something entirely unexpected", "task_error"),
-        # precedence: first matching branch wins, in this exact order
-        ("download and analysis both failed", "download_error"),
-        ("analysis failed while generating transcript", "analysis_error"),
-        ("transcript generation cancelled", "transcription_error"),
+        # Typed taxonomy: each typed pipeline failure maps by type.
+        (
+            DownloadError,
+            "Failed to download video",
+            "error",
+            "Failed to download video",
+            "download_error",
+        ),
+        (
+            TranscriptionError,
+            "Transcript generation failed",
+            "error",
+            "Transcript generation failed",
+            "transcription_error",
+        ),
+        (
+            AnalysisError,
+            "AI transcript analysis failed",
+            "error",
+            "AI transcript analysis failed",
+            "analysis_error",
+        ),
+        (
+            RenderError,
+            "Clip rendering failed for all segments",
+            "error",
+            "Clip rendering failed for all segments",
+            "task_error",
+        ),
+        (CancelledError, "Task cancelled", "cancelled", "Cancelled by user", None),
+        # Generic exceptions: the message text must NEVER influence error_code.
+        # These are the messages the removed string-matching fallback used to
+        # guess from; every one of them must now freeze to task_error.
+        (
+            RuntimeError,
+            "Something entirely unexpected",
+            "error",
+            "Something entirely unexpected",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "Failed to download video",
+            "error",
+            "Failed to download video",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "YouTube video could not be fetched",
+            "error",
+            "YouTube video could not be fetched",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "Transcript generation failed",
+            "error",
+            "Transcript generation failed",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "Analysis step failed",
+            "error",
+            "Analysis step failed",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "User cancelled the operation",
+            "error",
+            "User cancelled the operation",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "download and analysis both failed",
+            "error",
+            "download and analysis both failed",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "analysis failed while generating transcript",
+            "error",
+            "analysis failed while generating transcript",
+            "task_error",
+        ),
+        (
+            RuntimeError,
+            "transcript generation cancelled",
+            "error",
+            "transcript generation cancelled",
+            "task_error",
+        ),
     ],
 )
 @pytest.mark.asyncio
-async def test_process_task_error_code_mapping_is_frozen(message, expected_code):
+async def test_process_task_error_code_mapping_is_frozen(
+    exc_type,
+    message,
+    expected_status,
+    expected_progress_message,
+    expected_error_code,
+):
     service = build_task_service()
     service.video_service.process_video_complete = AsyncMock(
-        side_effect=RuntimeError(message)
+        side_effect=exc_type(message)
     )
 
-    with pytest.raises(RuntimeError, match=re.escape(message)):
+    with pytest.raises(exc_type, match=re.escape(message)):
         await service.process_task(
             task_id="task-1",
             url="https://www.youtube.com/watch?v=demo",
             source_type="youtube",
         )
 
-    # error path sets status "error" (never "cancelled") with raw message
+    # Terminal status carries the raw message except on the CancelledError
+    # branch, which persists the fixed "Cancelled by user" message and never
+    # writes an error_code.
     service.task_repo.update_task_status.assert_any_await(
         service.db,
         "task-1",
-        "error",
+        expected_status,
+        expected_statuses=["queued", "processing"],
         progress=0,
-        progress_message=message,
+        progress_message=expected_progress_message,
     )
     error_code_calls = [
         call.kwargs.get("error_code")
         for call in service.task_repo.update_task_runtime_metadata.await_args_list
         if "error_code" in call.kwargs
     ]
-    assert error_code_calls == [expected_code]
+    assert error_code_calls == (
+        [expected_error_code] if expected_error_code is not None else []
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +727,7 @@ async def test_process_task_cancel_sets_cancelled_status_and_reraises(tmp_path):
         service.db,
         "task-1",
         "cancelled",
+        expected_statuses=["queued", "processing"],
         progress=0,
         progress_message="Cancelled by user",
     )
@@ -632,14 +744,6 @@ async def test_process_task_cancel_sets_cancelled_status_and_reraises(tmp_path):
 # Stale-queued recovery: GET /tasks/{id} is read-only; the queued->error
 # transition belongs to the worker recovery sweep (R4).
 # ---------------------------------------------------------------------------
-
-
-class _NullRedisClient:
-    async def get(self, _key: str):
-        return None
-
-    async def close(self):
-        return None
 
 
 def _build_stale_config(timeout_seconds: int = 180) -> Config:
@@ -709,16 +813,8 @@ def test_is_stale_queued_task_ignores_non_queued_and_missing_timestamps():
     )
 
 
-def _patch_null_redis(monkeypatch):
-    monkeypatch.setattr(
-        "src.services.task_metadata_service.get_redis_client",
-        lambda **_kwargs: _NullRedisClient(),
-    )
-
-
 @pytest.mark.asyncio
 async def test_get_task_with_clips_is_read_only_for_stale_queued_task(monkeypatch):
-    _patch_null_redis(monkeypatch)
     service = TaskService(
         db=AsyncMock(), config=_build_stale_config(timeout_seconds=180)
     )
@@ -782,7 +878,6 @@ async def test_get_task_with_clips_is_read_only_for_stale_queued_task(monkeypatc
     ],
 )
 async def test_get_task_with_clips_no_timeout_transition(monkeypatch, task):
-    _patch_null_redis(monkeypatch)
     service = TaskService(
         db=AsyncMock(), config=_build_stale_config(timeout_seconds=180)
     )
@@ -867,6 +962,7 @@ async def test_sweep_stale_queued_tasks_marks_stale_as_error_and_skips_fresh(
         session_factory.session,
         "task-stale",
         "error",
+        expected_statuses=["queued"],
         progress=0,
         progress_message=(
             "Task timed out while waiting in queue. "
@@ -1249,6 +1345,7 @@ async def test_process_task_error_path_rolls_back_open_transaction():
         service.db,
         "task-1",
         "error",
+        expected_statuses=["queued", "processing"],
         progress=0,
         progress_message="simulated pipeline failure",
     )
@@ -1275,6 +1372,7 @@ async def test_process_task_error_path_rolls_back_even_when_clean():
         service.db,
         "task-1",
         "error",
+        expected_statuses=["queued", "processing"],
         progress=0,
         progress_message="simulated pipeline failure",
     )
@@ -1293,6 +1391,9 @@ async def test_process_task_error_path_never_masks_original_when_status_write_fa
         status_calls["count"] += 1
         if status_calls["count"] > 1:
             raise RuntimeError("status write exploded")
+        # The first update_task_status (the "processing" transition) must win
+        # the CAS so the pipeline actually runs and hits the simulated failure.
+        return True
 
     service.task_repo.update_task_status = AsyncMock(side_effect=flaky_status_write)
 

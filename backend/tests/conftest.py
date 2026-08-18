@@ -15,7 +15,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import Config, set_config_override
-from src.database import configure_database, init_db, reset_database_state
+from src.database import (
+    _normalize_async_database_url,
+    configure_database,
+    init_db,
+    reset_database_state,
+)
 from src.main_refactored import create_app
 
 
@@ -79,7 +84,9 @@ async def initialized_database(test_database_url):
     if not test_database_url:
         pytest.skip("DATABASE_URL or TEST_DATABASE_URL must be set for backend tests")
 
-    engine = create_async_engine(test_database_url, poolclass=NullPool)
+    engine = create_async_engine(
+        _normalize_async_database_url(test_database_url), poolclass=NullPool
+    )
     configure_database(engine=engine)
     await init_db()
     yield engine

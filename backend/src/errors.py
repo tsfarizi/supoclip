@@ -41,3 +41,13 @@ class InvalidSourceError(ValueError):
     ValueError (idiomatic bad-input signal) instead of the processing pipeline
     taxonomy: it never fires inside process_task.
     """
+
+
+class DuplicateTaskError(Exception):
+    """A task for the same source identity is already in flight.
+
+    Raised when the unique partial index on tasks.source_identity rejects a
+    concurrent duplicate submission. This is the DB-backed guarantee that
+    replaces the best-effort Python pre-check: the constraint decides, so two
+    parallel submissions of the same video resolve to exactly one winner.
+    """

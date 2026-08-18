@@ -17,14 +17,22 @@ from ...database import get_db
 from ...database import AsyncSessionLocal
 from ...services.task_service import TaskService
 from ...services.billing_service import BillingService, BillingLimitExceeded
-from ...errors import InvalidSourceError
+from ...errors import DuplicateTaskError, InvalidSourceError
 from ...auth_headers import resolve_authenticated_user_id
 from ...workers.job_queue import JobQueue
 from ...workers.progress import ProgressTracker
 from ...config import get_config
 from ...font_registry import is_font_accessible
 from ...clip_cleanup import normalize_clip_cleanup_settings
-from ...video_utils import VALID_OUTPUT_FORMATS
+from ...task_validation import (
+    clamp_sound_effects_count,
+    normalize_boolean,
+    normalize_font_color,
+    normalize_font_family,
+    normalize_font_size,
+    normalize_output_format,
+    normalize_processing_mode,
+)
 from ...admin_auth import require_admin_user
 from ...infra.redis_client import get_redis_client
 from ...clip_editor import export_with_preset, EXPORT_PRESETS
@@ -53,100 +61,18 @@ def build_clip_download_filename(clip: Dict[str, Any], suffix: str = "") -> str:
     return f"{title}{safe_suffix}.mp4"
 
 
-def _normalize_font_size(value: Any, default: int = 24) -> Optional[int]:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(12, min(72, parsed))
-
-
-def _normalize_font_color(value: Any, default: str = "#FFFFFF") -> Optional[str]:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    if isinstance(value, str) and re.match(r"^#[0-9A-Fa-f]{6}$", value):
-        return value.upper()
-    return default
-
-
-def _normalize_font_family(value: Any) -> Optional[str]:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+# Compatibility aliases: the normalization logic moved to task_validation; the
+# legacy private names stay resolvable here for existing tests that import them
+# from this module. The route code itself uses the public task_validation names.
+_normalize_font_size = normalize_font_size
+_normalize_font_color = normalize_font_color
+_normalize_font_family = normalize_font_family
 
 
 async def _get_user_id_from_headers(request: Request, db: AsyncSession) -> str:
     """Resolve the authenticated user ID from an API key or signed frontend headers."""
     config = get_config()
     return await resolve_authenticated_user_id(request, db, config)
-
-
-async def _load_task_source_metadata(task_id: str) -> Dict[str, Any]:
-    redis_client = get_redis_client()
-    try:
-        payload = await redis_client.get(f"task_source:{task_id}")
-    except Exception as exc:
-        logger.warning("Unable to load task source metadata for %s: %s", task_id, exc)
-        return {}
-
-    if not payload:
-        return {}
-
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return {}
-
-
-async def _save_task_source_metadata(task_id: str, payload: Dict[str, Any]) -> None:
-    redis_client = get_redis_client()
-    try:
-        await redis_client.set(
-            f"task_source:{task_id}",
-            json.dumps(payload),
-            ex=60 * 60 * 24 * 7,
-        )
-    except Exception as exc:
-        logger.warning("Unable to save task source metadata for %s: %s", task_id, exc)
-
-
-def _merge_task_source_metadata(
-    existing: Dict[str, Any] | None,
-    *,
-    source_url: Any = None,
-    source_type: Any = None,
-    output_format: Any = None,
-    add_subtitles: Any = None,
-    hook_persist: Any = None,
-    watermark: Any = None,
-    watermark_persist: Any = None,
-    sound_effects_count: Any = None,
-    cleanup_settings: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
-    merged = dict(existing or {})
-
-    if isinstance(source_url, str) and source_url:
-        merged["url"] = source_url
-    if isinstance(source_type, str) and source_type:
-        merged["source_type"] = source_type
-    if output_format in VALID_OUTPUT_FORMATS:
-        merged["output_format"] = output_format
-    if isinstance(add_subtitles, bool):
-        merged["add_subtitles"] = add_subtitles
-    if isinstance(hook_persist, bool):
-        merged["hook_persist"] = hook_persist
-    if isinstance(watermark, str) and watermark.strip():
-        merged["watermark"] = watermark
-    if isinstance(watermark_persist, bool):
-        merged["watermark_persist"] = watermark_persist
-    if isinstance(sound_effects_count, int) and 0 <= sound_effects_count <= 5:
-        merged["sound_effects_count"] = sound_effects_count
-    if cleanup_settings:
-        merged.update(cleanup_settings)
-
-    return merged
 
 
 async def _require_task_owner(
@@ -241,38 +167,30 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     raw_source = data.get("source")
     user_id = await _get_user_id_from_headers(request, db)
 
-    # Get font options
+# Get font options
     font_options = data.get("font_options", {})
-    font_family = _normalize_font_family(font_options.get("font_family"))
-    font_size = _normalize_font_size(font_options.get("font_size"))
-    font_color = _normalize_font_color(font_options.get("font_color"))
+    font_family = normalize_font_family(font_options.get("font_family"))
+    font_size = normalize_font_size(font_options.get("font_size"))
+    font_color = normalize_font_color(font_options.get("font_color"))
     caption_template = data.get("caption_template", "default")
     include_broll = data.get("include_broll", False)
-    try:
-        sound_effects_count = max(0, min(5, int(data.get("sound_effects_count", 0))))
-    except (TypeError, ValueError):
-        sound_effects_count = 0
-    runtime_config = get_config()
-    processing_mode = data.get(
-        "processing_mode", runtime_config.default_processing_mode
+    sound_effects_count = clamp_sound_effects_count(
+        data.get("sound_effects_count", 0)
     )
-    if processing_mode not in {"fast", "balanced", "quality"}:
-        processing_mode = runtime_config.default_processing_mode
-    output_format = data.get("output_format", "vertical")
-    if output_format not in VALID_OUTPUT_FORMATS:
-        output_format = "vertical"
-    add_subtitles = data.get("add_subtitles", True)
-    if not isinstance(add_subtitles, bool):
-        add_subtitles = True
-    hook_persist = data.get("hook_persist", False)
-    if not isinstance(hook_persist, bool):
-        hook_persist = False
+    runtime_config = get_config()
+    processing_mode = normalize_processing_mode(
+        data.get("processing_mode", runtime_config.default_processing_mode),
+        runtime_config.default_processing_mode,
+    )
+    output_format = normalize_output_format(data.get("output_format", "vertical"))
+    add_subtitles = normalize_boolean(data.get("add_subtitles", True), True)
+    hook_persist = normalize_boolean(data.get("hook_persist", False), False)
     watermark = data.get("watermark")
     if not isinstance(watermark, str):
         watermark = None
-    watermark_persist = data.get("watermark_persist", False)
-    if not isinstance(watermark_persist, bool):
-        watermark_persist = False
+    watermark_persist = normalize_boolean(
+        data.get("watermark_persist", False), False
+    )
     cleanup_settings = normalize_clip_cleanup_settings(
         data.get("cut_long_pauses"),
         data.get("pause_threshold_ms"),
@@ -350,24 +268,6 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             cleanup_settings=cleanup_settings,
         )
 
-        # Cache source metadata for resume/retries; the tasks columns are now
-        # the source of truth (B2), this Redis key is a legacy fallback cache.
-        await _save_task_source_metadata(
-            task_id,
-            _merge_task_source_metadata(
-                None,
-                source_url=raw_source["url"],
-                source_type=source_type,
-                output_format=output_format,
-                add_subtitles=add_subtitles,
-                hook_persist=hook_persist,
-                watermark=watermark,
-                watermark_persist=watermark_persist,
-                cleanup_settings=cleanup_settings,
-                sound_effects_count=sound_effects_count,
-            ),
-        )
-
         logger.info(f"Task {task_id} created and job {job_id} enqueued")
 
         return {
@@ -383,6 +283,11 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             status_code=400,
             detail="Source URL is not a supported video link. Use a YouTube URL or an uploaded video.",
         )
+    except DuplicateTaskError as e:
+        # The DB unique index rejected a concurrent duplicate submission that
+        # slipped past the pre-check above (race window). Same contract as the
+        # pre-check: 409 Conflict.
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
@@ -890,15 +795,14 @@ async def apply_task_settings(
     """Update task-level styling settings and optionally apply to all existing clips."""
     try:
         payload = await request.json()
-        font_family = _normalize_font_family(payload.get("font_family"))
-        font_size = _normalize_font_size(payload.get("font_size"))
-        font_color = _normalize_font_color(payload.get("font_color"))
+        font_family = normalize_font_family(payload.get("font_family"))
+        font_size = normalize_font_size(payload.get("font_size"))
+        font_color = normalize_font_color(payload.get("font_color"))
         caption_template = payload.get("caption_template", "default")
         include_broll = bool(payload.get("include_broll", False))
-        try:
-            sound_effects_count = max(0, min(5, int(payload.get("sound_effects_count", 0))))
-        except (TypeError, ValueError):
-            sound_effects_count = 0
+        sound_effects_count = clamp_sound_effects_count(
+            payload.get("sound_effects_count", 0)
+        )
         apply_to_existing = bool(payload.get("apply_to_existing", False))
         cleanup_settings = normalize_clip_cleanup_settings(
             payload.get("cut_long_pauses"),
@@ -921,30 +825,34 @@ async def apply_task_settings(
                 status_code=400, detail="Selected font is not available"
             )
         # Output format / subtitle settings default to the current DB record so
-        # a partial payload never silently resets render settings.
-        output_format = payload.get(
-            "output_format", task_record.get("output_format") or "vertical"
+        # a partial payload never silently resets render settings. The invalid
+        # value fallback stays the hard-coded "vertical" (historical behavior).
+        output_format = normalize_output_format(
+            payload.get(
+                "output_format", task_record.get("output_format") or "vertical"
+            )
         )
-        if output_format not in VALID_OUTPUT_FORMATS:
-            output_format = "vertical"
-        add_subtitles = payload.get(
-            "add_subtitles", task_record.get("add_subtitles", True)
+        add_subtitles = normalize_boolean(
+            payload.get(
+                "add_subtitles", task_record.get("add_subtitles", True)
+            ),
+            task_record.get("add_subtitles", True),
         )
-        if not isinstance(add_subtitles, bool):
-            add_subtitles = True
-        hook_persist = payload.get(
-            "hook_persist", task_record.get("hook_persist", False)
+        hook_persist = normalize_boolean(
+            payload.get(
+                "hook_persist", task_record.get("hook_persist", False)
+            ),
+            task_record.get("hook_persist", False),
         )
-        if not isinstance(hook_persist, bool):
-            hook_persist = False
         watermark = payload.get("watermark", task_record.get("watermark"))
         if not isinstance(watermark, str):
             watermark = None
-        watermark_persist = payload.get(
-            "watermark_persist", task_record.get("watermark_persist", False)
+        watermark_persist = normalize_boolean(
+            payload.get(
+                "watermark_persist", task_record.get("watermark_persist", False)
+            ),
+            task_record.get("watermark_persist", False),
         )
-        if not isinstance(watermark_persist, bool):
-            watermark_persist = False
         task = await task_service.update_task_settings(
             task_id,
             font_family,
@@ -958,25 +866,11 @@ async def apply_task_settings(
             output_format=output_format,
             add_subtitles=add_subtitles,
             hook_persist=hook_persist,
-            watermark=watermark,
+watermark=watermark,
             watermark_persist=watermark_persist,
         )
-        metadata = await _load_task_source_metadata(task_id)
-        await _save_task_source_metadata(
-            task_id,
-            _merge_task_source_metadata(
-                metadata,
-                source_url=metadata.get("url") or task_record.get("source_url"),
-                source_type=metadata.get("source_type") or task_record.get("source_type"),
-                output_format=task.get("output_format"),
-                add_subtitles=task.get("add_subtitles"),
-                hook_persist=task.get("hook_persist"),
-                watermark=task.get("watermark"),
-                watermark_persist=task.get("watermark_persist"),
-                cleanup_settings=cleanup_settings,
-                sound_effects_count=int(task.get("sound_effects_count") or 0),
-            ),
-        )
+        # Settings are persisted in the tasks row by update_task_settings;
+        # there is no separate metadata cache to refresh.
         return {"task": task, "message": "Task settings updated"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1047,13 +941,29 @@ async def cancel_task(
         redis_client = get_redis_client()
         await redis_client.setex(f"task_cancel:{task_id}", 3600, "1")
 
-        await task_service.task_repo.update_task_status(
+        updated = await task_service.task_repo.update_task_status(
             db,
             task_id,
             "cancelled",
+            expected_statuses=["queued", "processing"],
             progress=0,
             progress_message="Cancelled by user",
         )
+        if not updated:
+            # The task left queued/processing between the read and this write
+            # (worker completed/errored it, or another cancel won); never
+            # overwrite the terminal status.
+            logger.warning(
+                "Cancel CAS rejected for task %s: status changed concurrently",
+                task_id,
+            )
+            current = await task_service.task_repo.get_task_by_id(db, task_id)
+            return {
+                "message": (
+                    f"Task already in terminal state: "
+                    f"{current.get('status') if current else 'unknown'}"
+                )
+            }
 
         return {"message": "Task cancellation requested"}
     except HTTPException:
@@ -1096,24 +1006,19 @@ async def resume_task(
 
         source_url = task.get("source_url")
         source_type = task.get("source_type")
-        # B2: render settings are read from the task record (Schema v2 columns);
-        # the Redis task_source key is only consulted for legacy rows whose
-        # columns are still NULL.
-        output_format = task.get("output_format") or "vertical"
-        if output_format not in VALID_OUTPUT_FORMATS:
-            output_format = "vertical"
-        add_subtitles = task.get("add_subtitles", True)
-        if not isinstance(add_subtitles, bool):
-            add_subtitles = True
-        hook_persist = task.get("hook_persist", False)
-        if not isinstance(hook_persist, bool):
-            hook_persist = False
+        # P4: the tasks row (Schema v2 columns) is the single authority for
+        # render settings. The legacy Redis fallback was removed: a missing
+        # value marks a legacy row that was never backfilled and must fail
+        # loudly instead of silently resuming with defaults.
+        output_format = normalize_output_format(task.get("output_format") or "vertical")
+        add_subtitles = normalize_boolean(task.get("add_subtitles", True), True)
+        hook_persist = normalize_boolean(task.get("hook_persist", False), False)
         watermark = task.get("watermark")
         if not isinstance(watermark, str):
             watermark = None
-        watermark_persist = task.get("watermark_persist", False)
-        if not isinstance(watermark_persist, bool):
-            watermark_persist = False
+        watermark_persist = normalize_boolean(
+            task.get("watermark_persist", False), False
+        )
         cleanup_settings = None
         cleanup_settings_json = task.get("cleanup_settings_json")
         if cleanup_settings_json is not None:
@@ -1133,75 +1038,65 @@ async def resume_task(
                     parsed_cleanup.get("filtered_words"),
                 )
 
-        # The task row is authoritative. A missing value is the legacy-task
-        # default; Redis is not allowed to replace a persisted setting.
-        try:
-            sound_effects_count = max(
-                0, min(5, int(task.get("sound_effects_count") or 0))
-            )
-        except (TypeError, ValueError):
-            sound_effects_count = 0
-
-        needs_redis = (
-            not source_url
-            or not source_type
-            or task.get("output_format") is None
-            or task.get("add_subtitles") is None
-            or cleanup_settings is None
-        )
-        metadata = {}
-        if needs_redis:
-            metadata = await _load_task_source_metadata(task_id)
-        if not source_url:
-            source_url = metadata.get("url")
-        if not source_type:
-            source_type = metadata.get("source_type")
-        if task.get("output_format") is None:
-            of = metadata.get("output_format")
-            if of in VALID_OUTPUT_FORMATS:
-                output_format = of
-        if task.get("add_subtitles") is None:
-            asub = metadata.get("add_subtitles")
-            if isinstance(asub, bool):
-                add_subtitles = asub
-        if cleanup_settings is None:
-            cleanup_settings = normalize_clip_cleanup_settings(
-                metadata.get("cut_long_pauses"),
-                metadata.get("pause_threshold_ms"),
-                metadata.get("remove_filler_words"),
-                metadata.get("filtered_words"),
-            )
-
-        await _save_task_source_metadata(
-            task_id,
-            _merge_task_source_metadata(
-                metadata,
-                source_url=source_url,
-                source_type=source_type,
-                output_format=output_format,
-                add_subtitles=add_subtitles,
-                hook_persist=hook_persist,
-                watermark=watermark,
-                watermark_persist=watermark_persist,
-                sound_effects_count=sound_effects_count,
-                cleanup_settings=cleanup_settings,
-            ),
+        sound_effects_count = clamp_sound_effects_count(
+            task.get("sound_effects_count") or 0
         )
 
+        # Fail loudly on legacy rows whose Schema v2 columns were never
+        # backfilled: resuming with defaults would change the user's render
+        # settings silently, and the Redis fallback no longer exists.
         if not source_url or not source_type:
-            raise HTTPException(status_code=400, detail="Task source URL is missing")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Task source information is missing; this legacy task was "
+                    "not migrated and cannot be resumed. Please create a new task."
+                ),
+            )
+        if task.get("output_format") is None or task.get("add_subtitles") is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Task render settings are missing; this legacy task was "
+                    "not migrated and cannot be resumed. Please create a new task."
+                ),
+            )
+        if cleanup_settings is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Task cleanup settings are missing; this legacy task was "
+                    "not migrated and cannot be resumed. Please create a new task."
+                ),
+            )
 
         runtime_config = get_config()
-        redis_client = get_redis_client()
-        await redis_client.delete(f"task_cancel:{task_id}")
 
-        await task_service.task_repo.update_task_status(
+        requeued = await task_service.task_repo.update_task_status(
             db,
             task_id,
             "queued",
+            expected_statuses=["cancelled", "error", "queued"],
             progress=0,
             progress_message="Re-queued by user",
         )
+        if not requeued:
+            # The task left cancelled/error/queued between the read and this
+            # write (e.g. it completed or a new job took it over); do not
+            # enqueue a worker job against a task that is not resumable.
+            logger.warning(
+                "Resume CAS rejected for task %s: status changed concurrently",
+                task_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Task status changed concurrently; it can no longer be resumed",
+            )
+
+        # Only clear the cancel flag after the re-queue won, so a concurrent
+        # cancel request cannot resurrect the flag for the new job.
+        redis_client = get_redis_client()
+        await redis_client.delete(f"task_cancel:{task_id}")
 
         processing_mode = (
             task.get("processing_mode") or runtime_config.default_processing_mode

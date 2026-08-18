@@ -6,7 +6,6 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     CheckConstraint,
-    ARRAY,
     Boolean,
     Float,
     Integer,
@@ -135,8 +134,11 @@ class Task(Base):
     source_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
     )
-    generated_clips_ids: Mapped[Optional[List[str]]] = mapped_column(
-        ARRAY(String(36)), nullable=True
+    # Canonical identity (youtube:<video_id> or verbatim upload path) used by
+    # the partial unique index uq_tasks_source_identity_active to reject
+    # duplicate in-flight submissions at the storage layer.
+    source_identity: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
     )
     status: Mapped[str] = mapped_column(
         String(20), server_default=sql_text("'pending'"), nullable=False

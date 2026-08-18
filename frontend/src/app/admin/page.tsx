@@ -2,6 +2,7 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import { auth } from "@/lib/auth";
 import prisma from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 import { AdminUserToggle } from "@/components/admin/admin-user-toggle";
 import {
   RuntimeSettingsForm,
@@ -134,7 +135,6 @@ export default async function AdminPage({
         id: true,
         status: true,
         created_at: true,
-        generated_clips_ids: true,
         user: {
           select: {
             id: true,
@@ -175,7 +175,6 @@ export default async function AdminPage({
             id: true,
             status: true,
             created_at: true,
-            generated_clips_ids: true,
             source: {
               select: {
                 title: true,
@@ -188,6 +187,18 @@ export default async function AdminPage({
   ]);
 
   const generationCountByUser = new Map(tasksByUser.map((item) => [item.user_id, item._count._all]));
+
+  const listedTaskIds = [...recentGenerations, ...selectedUserTasks].map((task) => task.id);
+  const clipCountRows =
+    listedTaskIds.length > 0
+      ? await prisma.$queryRaw<Array<{ task_id: string; count: number }>>`
+          SELECT task_id, COUNT(*)::int AS count
+          FROM generated_clips
+          WHERE task_id IN (${Prisma.join(listedTaskIds)})
+          GROUP BY task_id
+        `
+      : [];
+  const clipCountByTask = new Map(clipCountRows.map((row) => [row.task_id, row.count]));
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
@@ -306,7 +317,7 @@ export default async function AdminPage({
                   <td className="px-4 py-3">
                     <Badge className={statusBadgeClass(task.status)}>{task.status}</Badge>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{task.generated_clips_ids.length}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">{clipCountByTask.get(task.id) ?? 0}</td>
                   <td className="px-4 py-3 text-sm text-gray-600">{task.created_at.toLocaleString()}</td>
                 </tr>
               ))}
@@ -418,7 +429,7 @@ export default async function AdminPage({
                       <td className="px-4 py-3">
                         <Badge className={statusBadgeClass(task.status)}>{task.status}</Badge>
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{task.generated_clips_ids.length}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700">{clipCountByTask.get(task.id) ?? 0}</td>
                       <td className="px-4 py-3 text-sm text-gray-600">{task.created_at.toLocaleString()}</td>
                     </tr>
                   ))

@@ -127,9 +127,6 @@ async def test_regenerate_all_clips_reuses_persisted_source_ranges(monkeypatch, 
                 "source_type": "video_url",
             }
 
-        async def update_task_clips(self, _db, _task_id: str, _clip_ids):
-            return None
-
     class _FakeClipRepoWithTask:
         async def get_clips_by_task(self, _db, _task_id: str):
             return [
@@ -164,7 +161,7 @@ async def test_regenerate_all_clips_reuses_persisted_source_ranges(monkeypatch, 
             return []
 
     service = TaskService(db=None)
-    async def fake_load_task_source_settings(_task_id: str):
+    async def fake_load_task_render_settings(_task: dict):
         return {
             "output_format": "vertical",
             "add_subtitles": True,
@@ -174,7 +171,7 @@ async def test_regenerate_all_clips_reuses_persisted_source_ranges(monkeypatch, 
             "filtered_words": [],
         }
 
-    monkeypatch.setattr(service, "_load_task_source_settings", fake_load_task_source_settings)
+    monkeypatch.setattr(service, "_load_task_render_settings", fake_load_task_render_settings)
     service.task_repo = _FakeTaskRepo()
     service.clip_repo = _FakeClipRepoWithTask()
     service.video_service = _FakeVideoService()
@@ -212,9 +209,6 @@ async def test_regenerate_all_clips_recomputes_cleanup_from_source_ranges(
                 "source_type": "video_url",
             }
 
-        async def update_task_clips(self, _db, _task_id: str, _clip_ids):
-            return None
-
     class _FakeClipRepoWithTask:
         async def get_clips_by_task(self, _db, _task_id: str):
             return [
@@ -250,7 +244,7 @@ async def test_regenerate_all_clips_recomputes_cleanup_from_source_ranges(
 
     service = TaskService(db=None)
 
-    async def fake_load_task_source_settings(_task_id: str):
+    async def fake_load_task_render_settings(_task: dict):
         return {
             "output_format": "vertical",
             "add_subtitles": True,
@@ -260,7 +254,7 @@ async def test_regenerate_all_clips_recomputes_cleanup_from_source_ranges(
             "filtered_words": [],
         }
 
-    monkeypatch.setattr(service, "_load_task_source_settings", fake_load_task_source_settings)
+    monkeypatch.setattr(service, "_load_task_render_settings", fake_load_task_render_settings)
     service.task_repo = _FakeTaskRepo()
     service.clip_repo = _FakeClipRepoWithTask()
     service.video_service = _FakeVideoService()

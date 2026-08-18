@@ -16,6 +16,7 @@ from ...runtime_settings import (
     encrypt_setting_value,
     get_runtime_setting_rows,
     load_runtime_settings_cache,
+    publish_settings_changed,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -215,6 +216,9 @@ async def update_runtime_settings(
         )
 
     await db.commit()
+    # Signal other API/worker processes to reload their runtime settings
+    # cache. Best-effort: a Redis failure must not fail the admin request.
+    await publish_settings_changed()
     await load_runtime_settings_cache(db)
 
     rows = await get_runtime_setting_rows(db)

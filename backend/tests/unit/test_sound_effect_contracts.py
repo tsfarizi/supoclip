@@ -22,7 +22,6 @@ from src.config import Config, set_config_override
 from src.observability import redact_secrets
 from src.services.task_service import TaskService
 from src.services.video_service import VideoService
-from src.api.routes.tasks import _merge_task_source_metadata
 
 
 TOKEN = "test-token-that-must-not-appear-in-errors"
@@ -576,16 +575,6 @@ async def test_sfx_sidecar_marks_provider_failure_as_degraded(monkeypatch, tmp_p
     payload = json.loads(clip.with_suffix(".sfx.json").read_text())
     assert payload["degraded"] is True
     assert payload["placements"] == []
-
-
-@pytest.mark.parametrize("count", range(6))
-def test_task_metadata_accepts_api_facing_count_range(count):
-    merged = _merge_task_source_metadata({}, sound_effects_count=count)
-    assert merged["sound_effects_count"] == count
-
-
-def test_task_metadata_ignores_api_count_outside_range():
-    assert "sound_effects_count" not in _merge_task_source_metadata({}, sound_effects_count=6)
 
 
 def test_task_analysis_cache_key_changes_with_sfx_count_and_clamps_count():

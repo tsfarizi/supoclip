@@ -33,17 +33,47 @@ async def sweep_stale_queued_tasks(ctx: Dict[str, Any]) -> int:
         stale_count = 0
         for task in await TaskRepository.get_queued_tasks(db):
             if task_service._is_stale_queued_task(task):
-                await task_service.task_repo.update_task_status(
+                updated = await task_service.task_repo.update_task_status(
                     db,
                     task["id"],
                     "error",
+                    expected_statuses=["queued"],
                     progress=0,
                     progress_message=QUEUED_TASK_TIMEOUT_MESSAGE,
                 )
-                stale_count += 1
+                if updated:
+                    stale_count += 1
+                else:
+                    logger.warning(
+                        "Sweep CAS rejected for task %s: no longer queued; skipping",
+                        task["id"],
+                    )
         if stale_count:
             logger.warning("Marked %d stale queued task(s) as error", stale_count)
         return stale_count
+
+
+async def reconcile_orphaned_clip_files(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Reclaim rendered clip files that no generated_clips row references.
+
+    Crash leftovers (render killed between file write and DB commit, or before
+    the superseded file was dropped) pile up in the clips temp dir. Runs on a
+    cron schedule; rows are read once and files are removed per-path.
+    """
+    from ..database import AsyncSessionLocal
+    from ..clip_cleanup import reconcile_orphaned_clip_files as reconcile
+
+    async with AsyncSessionLocal() as db:
+        summary = await reconcile(db)
+        if summary["removed"]:
+            logger.warning(
+                "Orphan clip sweep: scanned=%d referenced=%d removed=%d failed=%d",
+                summary["scanned"],
+                summary["referenced"],
+                summary["removed"],
+                summary["failed"],
+            )
+        return summary
 
 
 async def process_video_task(
@@ -212,4 +242,7 @@ class WorkerSettings:
 
     # Worker pool settings
     max_jobs = 4  # Process up to 4 jobs simultaneously
-    cron_jobs = [cron(sweep_stale_queued_tasks, minute=0)]
+    cron_jobs = [
+        cron(sweep_stale_queued_tasks, minute=0),
+        cron(reconcile_orphaned_clip_files, minute=0),
+    ]

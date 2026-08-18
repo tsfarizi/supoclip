@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Mapping
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -11,6 +14,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+SETTINGS_CHANGED_CHANNEL = "settings.changed"
+
+_INVALIDATION_RETRY_DELAY_SECONDS = 5.0
 
 RUNTIME_SETTING_KEYS: tuple[str, ...] = (
     "ASSEMBLY_AI_API_KEY",
@@ -134,6 +141,11 @@ def setting_prefers_admin(name: str) -> bool:
 
 
 def apply_settings_to_process_env(resolved_settings: Mapping[str, str | None]) -> None:
+    # Boundary: this mutates the process-global os.environ for the current
+    # process only. Cross-process propagation of admin setting changes is
+    # handled by the settings.changed invalidation channel (publish_settings_changed
+    # / SettingsInvalidationSubscriber); expanding this function's scope is out
+    # of unit P7's contract.
     for key in PROCESS_ENV_SETTING_KEYS:
         value = resolved_settings.get(key)
         if value:
@@ -165,3 +177,122 @@ async def get_runtime_setting_rows(db: AsyncSession) -> dict[str, dict[str, obje
         }
         for row in rows.mappings()
     }
+
+
+def _invalidation_payload() -> str:
+    return json.dumps({"published_at": datetime.now(timezone.utc).isoformat()})
+
+
+async def publish_settings_changed() -> None:
+    """Best-effort publish of a settings invalidation signal. Never raises."""
+    try:
+        # Lazy import keeps this module importable from config.py without a
+        # redis_client -> config -> runtime_settings import cycle.
+        from .infra.redis_client import get_redis_client
+
+        await get_redis_client().publish(SETTINGS_CHANGED_CHANNEL, _invalidation_payload())
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning(
+            "Failed to publish %s invalidation signal; other processes will "
+            "not reload until the next settings change",
+            SETTINGS_CHANGED_CHANNEL,
+            exc_info=True,
+        )
+
+
+class SettingsInvalidationSubscriber:
+    """Background listener for the settings.changed channel.
+
+    Each invalidation message triggers a reload of the runtime settings cache
+    with a fresh DB session. The listener retries forever, so a transient
+    Redis outage only delays the next reload; it never escapes the task.
+    """
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    async def start(self) -> None:
+        if self.running:
+            return
+        try:
+            self._task = asyncio.create_task(self._run())
+        except Exception:
+            logger.exception("Failed to start settings invalidation subscriber")
+            self._task = None
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Error while stopping settings invalidation subscriber")
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await self._listen_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Settings invalidation subscription lost (%s); retrying in %ss",
+                    exc,
+                    _INVALIDATION_RETRY_DELAY_SECONDS,
+                )
+            try:
+                await asyncio.sleep(_INVALIDATION_RETRY_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                raise
+
+    async def _listen_once(self) -> None:
+        # Lazy imports keep this module importable from config.py without a
+        # redis_client -> config -> runtime_settings import cycle.
+        from .infra.redis_client import get_redis_client
+
+        redis = get_redis_client()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(SETTINGS_CHANGED_CHANNEL)
+        logger.info(
+            "Settings invalidation subscriber listening on %s", SETTINGS_CHANGED_CHANNEL
+        )
+        try:
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                await self._reload_cache()
+        finally:
+            try:
+                await pubsub.unsubscribe(SETTINGS_CHANGED_CHANNEL)
+            except Exception:
+                pass
+            try:
+                await pubsub.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    async def _reload_cache() -> None:
+        try:
+            # Lazy import: see _listen_once.
+            from .database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as db:
+                await load_runtime_settings_cache(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Failed to reload runtime settings cache after invalidation: %s", exc
+            )

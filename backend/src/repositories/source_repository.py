@@ -17,9 +17,19 @@ class SourceRepository:
 
     @staticmethod
     async def create_source(
-        db: AsyncSession, source_type: str, title: str, url: Optional[str] = None
+        db: AsyncSession,
+        source_type: str,
+        title: str,
+        url: Optional[str] = None,
+        commit: bool = True,
     ) -> str:
-        """Create a new source record and return its ID."""
+        """Create a new source record and return its ID.
+
+        ``commit=False`` defers the transaction boundary to the caller (the
+        task service wraps source + task + billing reservation in one atomic
+        commit). Defaults to True so all existing callers keep their own
+        commit behavior.
+        """
         source_id = str(uuid4())
         # B3 fallback removed: single INSERT with url (NOT NULL in Schema v2),
         # fail-loud on any DB error.
@@ -39,7 +49,8 @@ class SourceRepository:
             },
         )
         source_id = result.scalar()
-        await db.commit()
+        if commit:
+            await db.commit()
 
         logger.info(f"Created source {source_id}: {title} ({source_type})")
         return source_id

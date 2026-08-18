@@ -148,29 +148,39 @@ if (-not $dbOk) {
 }
 
 # --- 7. versioned migrations -------------------------------------------------
-# init.sql is only a fresh-database bootstrap. Apply tracked migrations before
-# launching either process so existing databases receive the same schema.
-$env:PGPASSWORD = 'supoclip_password'
-$migrationDir = Join-Path $repo 'backend\src\migrations\sql'
-Invoke-Psql 'supoclip' 'supoclip' "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(255) PRIMARY KEY, applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);"
-if ($script:pgExit -ne 0) { Write-Fail "Unable to create the migration ledger."; Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit 1 }
-foreach ($migration in @(Get-ChildItem -LiteralPath $migrationDir -Filter '*.sql' -File | Sort-Object Name)) {
-    $version = $migration.Name
-    $applied = & $psql -U supoclip -h localhost -p 5433 -d supoclip -At -c "SELECT 1 FROM schema_migrations WHERE version = '$version' LIMIT 1;" 2>$null
-    if ($LASTEXITCODE -ne 0) { Write-Fail "Unable to inspect migration ledger."; Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit 1 }
-    if (($applied -join '').Trim() -eq '1') { continue }
-
-    $migrationSql = Get-Content -LiteralPath $migration.FullName -Raw
-    $transactionSql = "BEGIN;`n$migrationSql`nINSERT INTO schema_migrations (version) VALUES ('$version');`nCOMMIT;"
-    & $psql -U supoclip -h localhost -p 5433 -d supoclip -v ON_ERROR_STOP=1 -c $transactionSql 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "Migration $version failed; startup aborted."
-        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
-        exit 1
-    }
+# Alembic is the single migration authority for the backend schema. init.sql
+# (step 6) bootstraps fresh databases; the guarded baseline revision then
+# converges every database state (fresh / legacy-migrated) to head without
+# destructive DDL, so existing data is never touched. The old psql *.sql loop
+# and the schema_migrations ledger are retired (no remaining readers).
+Write-Step "Running Alembic migrations"
+$alembicIni = Join-Path $repo 'backend\src\migrations\alembic.ini'
+$backendDir = Join-Path $repo 'backend'
+$venvPy = Join-Path $repo 'backend\.venv\Scripts\python.exe'
+if (-not (Test-Path $venvPy)) {
+    Write-Step "uv sync (backend) for alembic"
+    Push-Location $backendDir
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & uv sync 2>&1 | Select-Object -Last 3 } finally { $ErrorActionPreference = $prevEap; Pop-Location }
+    if ($LASTEXITCODE -ne 0) { Write-Fail "uv sync failed; cannot run alembic."; exit 1 }
 }
-Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
-Write-Ok "Versioned migrations applied"
+if (-not (Test-Path $alembicIni)) { Write-Fail "alembic.ini missing at $alembicIni"; exit 1 }
+# Alembic must target the database that step 6 bootstrapped (localhost:5433),
+# mirroring the old psql loop which hardcoded that endpoint; the caller's
+# DATABASE_URL is restored afterwards so later steps keep their own target.
+$savedDbUrl = $env:DATABASE_URL
+$env:DATABASE_URL = 'postgresql+asyncpg://supoclip:supoclip_password@localhost:5433/supoclip'
+Push-Location $backendDir
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try { & $venvPy -m alembic -c $alembicIni upgrade head 2>&1 | Select-Object -Last 5 } finally { $ErrorActionPreference = $prevEap; Pop-Location }
+$env:DATABASE_URL = $savedDbUrl
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "alembic upgrade head failed; startup aborted."
+    exit 1
+}
+Write-Ok "Alembic migrations applied"
 
 # --- 8. dependency install --------------------------------------------------
 if (-not $SkipDeps) {

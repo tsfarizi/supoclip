@@ -40,7 +40,13 @@ from ..clip_source_map import (
 from ..transition_engine import compose_hook_and_main
 from ..ai import get_most_relevant_parts_by_transcript
 from ..config import get_config
-from ..errors import CancelledError, DownloadError, InvalidSourceError
+from ..errors import (
+    AnalysisError,
+    CancelledError,
+    DownloadError,
+    InvalidSourceError,
+    TranscriptionError,
+)
 
 logger = logging.getLogger(__name__)
 UPLOAD_URL_PREFIX = "upload://"
@@ -375,7 +381,13 @@ class VideoService:
         Download a YouTube video asynchronously.
         """
         logger.info(f"Starting video download: {url}")
-        video_path = await async_download_youtube_video(url, 3, task_id)
+        try:
+            video_path = await async_download_youtube_video(url, 3, task_id)
+        except Exception as exc:
+            # Source-level wrap: download failures must surface as
+            # DownloadError so TaskService classifies them without guessing
+            # from the message text.
+            raise DownloadError(f"Failed to download video: {exc}") from exc
 
         if not video_path:
             logger.error(f"Failed to download video: {url}")
@@ -411,14 +423,20 @@ class VideoService:
         if processing_mode == "fast":
             speech_model = runtime_config.fast_mode_transcript_model
 
-        if runtime_config.transcript_provider == "local_asr":
-            transcript = await run_in_thread(
-                get_video_transcript_local, video_path, speech_model
-            )
-        else:
-            transcript = await run_in_thread(
-                get_video_transcript, video_path, speech_model
-            )
+        try:
+            if runtime_config.transcript_provider == "local_asr":
+                transcript = await run_in_thread(
+                    get_video_transcript_local, video_path, speech_model
+                )
+            else:
+                transcript = await run_in_thread(
+                    get_video_transcript, video_path, speech_model
+                )
+        except Exception as exc:
+            # Source-level wrap: transcription failures must surface as
+            # TranscriptionError so TaskService classifies them without
+            # guessing from the message text.
+            raise TranscriptionError(f"Transcript generation failed: {exc}") from exc
         logger.info(f"Transcript generated: {len(transcript)} characters")
         return transcript
 
@@ -435,13 +453,19 @@ class VideoService:
         This is already async, no need to wrap.
         """
         logger.info("Starting AI analysis of transcript")
-        relevant_parts = await get_most_relevant_parts_by_transcript(
-            transcript,
-            clip_signals=clip_signals,
-            include_broll=include_broll,
-            visual_signals=visual_signals,
-            max_sfx_count=max_sfx_count,
-        )
+        try:
+            relevant_parts = await get_most_relevant_parts_by_transcript(
+                transcript,
+                clip_signals=clip_signals,
+                include_broll=include_broll,
+                visual_signals=visual_signals,
+                max_sfx_count=max_sfx_count,
+            )
+        except Exception as exc:
+            # Source-level wrap: analysis failures must surface as
+            # AnalysisError so TaskService classifies them without guessing
+            # from the message text.
+            raise AnalysisError(f"AI transcript analysis failed: {exc}") from exc
         logger.info(
             f"AI analysis complete: {len(relevant_parts.most_relevant_segments)} segments found"
         )

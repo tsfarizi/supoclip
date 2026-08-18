@@ -109,10 +109,10 @@ async def create_task(
         text(
             """
             INSERT INTO tasks (
-                id, user_id, source_id, generated_clips_ids, status,
+                id, user_id, source_id, status,
                 font_family, font_size, font_color, created_at, updated_at
             ) VALUES (
-                :id, :user_id, :source_id, ARRAY[]::VARCHAR(36)[], :status,
+                :id, :user_id, :source_id, :status,
                 'TikTokSans-Regular', 24, '#FFFFFF', NOW(), NOW()
             )
             """
@@ -153,10 +153,6 @@ async def create_clip(
             "task_id": task_id,
             "text": text_value,
         },
-    )
-    await session.execute(
-        text("UPDATE tasks SET generated_clips_ids = ARRAY[:clip_id]::VARCHAR(36)[] WHERE id = :task_id"),
-        {"clip_id": clip_id, "task_id": task_id},
     )
     await session.commit()
     return {"id": clip_id}

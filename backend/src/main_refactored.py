@@ -21,7 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import Config, get_config, set_config_override
 from .database import AsyncSessionLocal, close_db, configure_database, get_db, init_db
-from .runtime_settings import load_runtime_settings_cache
+from .runtime_settings import (
+    SettingsInvalidationSubscriber,
+    load_runtime_settings_cache,
+)
 from .workers.job_queue import JobQueue
 from .api.routes import tasks
 from .api.routes.admin import router as admin_router
@@ -66,12 +69,25 @@ def create_app(
                 await load_runtime_settings_cache(db)
             logger.info("✅ Runtime settings loaded")
 
+            settings_invalidation_subscriber = SettingsInvalidationSubscriber()
+            await settings_invalidation_subscriber.start()
+            app.state.settings_invalidation_subscriber = (
+                settings_invalidation_subscriber
+            )
+            logger.info("✅ Settings invalidation subscriber started")
+
             await queue_adapter.get_pool()
             logger.info("✅ Job queue initialized")
 
             yield
         finally:
             logger.info("🛑 Shutting down SupoClip API...")
+            subscriber = getattr(
+                app.state, "settings_invalidation_subscriber", None
+            )
+            if subscriber is not None:
+                await subscriber.stop()
+                logger.info("✅ Settings invalidation subscriber stopped")
             await close_db()
             await queue_adapter.close_pool()
             from .infra.redis_client import close_redis_clients

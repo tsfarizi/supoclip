@@ -15,6 +15,7 @@ from ..repositories.cache_repository import CacheRepository
 from .video_service import VideoService
 from ..config import Config, get_config
 from ..infra.redis_client import get_sync_redis_client
+from ..clip_cleanup import clip_sidecar_paths
 from ..clip_source_map import (
     copy_clip_source_ranges,
     load_clip_source_ranges,
@@ -71,6 +72,21 @@ class ClipRenderService:
         if self.task_service is not None:
             return self.task_service.video_service
         return self._video_service
+
+    @staticmethod
+    def _remove_superseded_clip(old_path: Path, new_path: Path) -> None:
+        """Drop a replaced clip file and its sidecars once the row commit points at new_path."""
+        try:
+            if not old_path.exists():
+                return
+            if old_path.resolve() == new_path.resolve():
+                return
+            for path in [old_path, *clip_sidecar_paths(old_path)]:
+                path.unlink(missing_ok=True)
+        except Exception:
+            logger.debug(
+                "Could not remove superseded clip file %s", old_path, exc_info=True
+            )
 
     @staticmethod
     def _build_cache_key(
@@ -149,6 +165,9 @@ class ClipRenderService:
             clip_duration,
             clip.get("text") or "",
         )
+        # Phase 2: the superseded input is dropped only after the row has
+        # committed pointing at the trimmed file.
+        self._remove_superseded_clip(input_path, output_path)
         return (await self.clip_repo.get_clip_by_id(self.db, clip_id)) or {}
 
     async def split_clip(
@@ -213,6 +232,9 @@ class ClipRenderService:
         )
 
         await self.clip_repo.reorder_task_clips(self.db, task_id)
+        # Phase 2: the original input is replaced by the two split files; drop it
+        # only after both rows have committed (update + create).
+        self._remove_superseded_clip(input_path, first_path)
         return {"message": "Clip split successfully"}
 
     async def merge_clips(
@@ -304,6 +326,10 @@ class ClipRenderService:
             await self.clip_repo.delete_clip(self.db, clip["id"])
 
         await self.clip_repo.reorder_task_clips(self.db, task_id)
+        # Phase 2: every source clip is superseded by the merged file; drop them
+        # only after the first row was updated and the rest deleted (all committed).
+        for path in paths:
+            self._remove_superseded_clip(path, merged_path)
         return {"message": "Clips merged successfully", "clip_id": first["id"]}
 
     async def _build_editor_hook(self, clip: Dict[str, Any]) -> Optional[Path]:
@@ -464,19 +490,9 @@ class ClipRenderService:
             )
             if not output_path.exists():
                 raise RuntimeError("Re-render failed: output clip file was not created")
-            # Carry the source-range mapping to the new file first, then drop the
-            # superseded clip file once the new one exists.
+            # Carry the source-range mapping to the new file before the old one
+            # is dropped.
             copy_clip_source_ranges(input_path, output_path)
-            if (
-                input_path.exists()
-                and input_path.resolve() != output_path.resolve()
-            ):
-                try:
-                    input_path.unlink(missing_ok=True)
-                except Exception:
-                    logger.debug(
-                        "Could not remove superseded clip file %s", input_path, exc_info=True
-                    )
         finally:
             try:
                 render_redis.delete(lock_key)
@@ -493,4 +509,7 @@ class ClipRenderService:
             clip["duration"],
             caption_text,
         )
+        # Phase 2: the superseded input is dropped only after the row has
+        # committed pointing at the re-rendered file.
+        self._remove_superseded_clip(input_path, output_path)
         return (await self.clip_repo.get_clip_by_id(self.db, clip_id)) or {}

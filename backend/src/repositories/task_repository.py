@@ -11,6 +11,8 @@ from datetime import datetime
 import json
 import logging
 
+from ..task_validation import clamp_sound_effects_count
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,8 +51,16 @@ class TaskRepository:
         watermark: Optional[str] = None,
         watermark_persist: bool = False,
         cleanup_settings_json: Optional[Any] = None,
+        source_identity: Optional[str] = None,
+        commit: bool = True,
     ) -> str:
-        """Create a new task and return its ID."""
+        """Create a new task and return its ID.
+
+        ``commit=False`` defers the transaction boundary to the caller (the
+        task service wraps source + task + billing reservation in one atomic
+        commit). Defaults to True so all existing callers keep their own
+        commit behavior.
+        """
         task_id = str(uuid4())
         # B3 fallback removed: single INSERT, fail-loud on any DB error.
         # B2: task source settings are persisted here (output_format /
@@ -61,14 +71,14 @@ class TaskRepository:
                     id, user_id, source_id, status, font_family, font_size, font_color,
                     caption_template, include_broll, sound_effects_count, processing_mode,
                     output_format, add_subtitles, hook_persist, watermark, watermark_persist,
-                    cleanup_settings_json,
+                    cleanup_settings_json, source_identity,
                     created_at, updated_at
                 )
                 VALUES (
                     :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
                     :caption_template, :include_broll, :sound_effects_count, :processing_mode,
                     :output_format, :add_subtitles, :hook_persist, :watermark, :watermark_persist,
-                    CAST(:cleanup_settings_json AS jsonb),
+                    CAST(:cleanup_settings_json AS jsonb), :source_identity,
                     NOW(), NOW()
                 )
                 RETURNING id
@@ -83,7 +93,9 @@ class TaskRepository:
                 "font_color": font_color,
                 "caption_template": caption_template,
                 "include_broll": include_broll,
-                "sound_effects_count": max(0, min(5, int(sound_effects_count))),
+                "sound_effects_count": clamp_sound_effects_count(
+                    sound_effects_count
+                ),
                 "processing_mode": processing_mode,
                 "output_format": output_format,
                 "add_subtitles": add_subtitles,
@@ -93,9 +105,11 @@ class TaskRepository:
                 "cleanup_settings_json": _serialize_cleanup_settings_json(
                     cleanup_settings_json
                 ),
+                "source_identity": source_identity,
             },
         )
-        await db.commit()
+        if commit:
+            await db.commit()
         task_id = result.scalar()
         if not task_id:
             raise RuntimeError("Failed to create task: no ID returned")
@@ -132,7 +146,6 @@ class TaskRepository:
             "status": row.status,
             "progress": row.progress,
             "progress_message": row.progress_message,
-            "generated_clips_ids": row.generated_clips_ids,
             "font_family": row.font_family,
             "font_size": row.font_size,
             "font_color": row.font_color,
@@ -153,6 +166,7 @@ class TaskRepository:
             "completed_at": row.completed_at,
             "completion_notification_sent_at": row.completion_notification_sent_at,
             "source_url": row.source_url,
+            "source_identity": row.source_identity,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -286,8 +300,10 @@ class TaskRepository:
                 "font_size": font_size,
                 "font_color": font_color,
                 "caption_template": caption_template,
-                "include_broll": include_broll,
-                "sound_effects_count": max(0, min(5, int(sound_effects_count))),
+"include_broll": include_broll,
+                "sound_effects_count": clamp_sound_effects_count(
+                    sound_effects_count
+                ),
                 "output_format": output_format,
                 "add_subtitles": add_subtitles,
                 "hook_persist": hook_persist,
@@ -305,50 +321,61 @@ class TaskRepository:
         db: AsyncSession,
         task_id: str,
         status: str,
+        *,
+        expected_statuses: List[str],
         progress: Optional[int] = None,
         progress_message: Optional[str] = None,
-    ) -> None:
-        """Update task status and optional progress."""
-        params = {
-            "task_id": task_id,
-            "status": status,
-            "progress": progress,
-            "progress_message": progress_message,
-        }
+    ) -> bool:
+        """CAS-style status transition: apply only when the current status is
+        one of expected_statuses.
+
+        Returns True when exactly one row matched the guard and was updated.
+        A False result means the status changed concurrently (or the row is
+        gone); the caller must not retry blindly and must not overwrite.
+        """
+        if not expected_statuses:
+            raise ValueError("expected_statuses must be non-empty")
+
+        params: Dict[str, Any] = {"task_id": task_id, "status": status}
 
         # Build dynamic query based on what's provided
         set_parts = ["status = :status"]
 
         if progress is not None:
             set_parts.append("progress = :progress")
+            params["progress"] = progress
 
         if progress_message is not None:
             set_parts.append("progress_message = :progress_message")
+            params["progress_message"] = progress_message
 
         set_parts.append("updated_at = NOW()")
 
-        query = f"UPDATE tasks SET {', '.join(set_parts)} WHERE id = :task_id"
+        # Literal placeholders instead of `IN :expected`: asyncpg does not
+        # expand list binds through text() and the values come from the
+        # pinned transition matrix, never from user input.
+        status_params = {
+            f"expected_{i}": expected for i, expected in enumerate(expected_statuses)
+        }
+        params.update(status_params)
+        status_in = ", ".join(f":expected_{i}" for i in range(len(expected_statuses)))
 
-        await db.execute(text(query), params)
-        await db.commit()
-        logger.info(
-            f"Updated task {task_id} status to {status}"
-            + (f" (progress: {progress}%)" if progress else "")
+        query = (
+            f"UPDATE tasks SET {', '.join(set_parts)} "
+            f"WHERE id = :task_id AND status IN ({status_in})"
         )
 
-    @staticmethod
-    async def update_task_clips(
-        db: AsyncSession, task_id: str, clip_ids: List[str]
-    ) -> None:
-        """Update task with generated clip IDs."""
-        await db.execute(
-            text(
-                "UPDATE tasks SET generated_clips_ids = :clip_ids, updated_at = NOW() WHERE id = :task_id"
-            ),
-            {"clip_ids": clip_ids, "task_id": task_id},
-        )
+        result = await db.execute(text(query), params)
         await db.commit()
-        logger.info(f"Updated task {task_id} with {len(clip_ids)} clips")
+        # DML execution yields a CursorResult at runtime; the static Result
+        # type hides rowcount, so silence the attr lookup explicitly.
+        updated = result.rowcount > 0  # type: ignore[attr-defined]
+        if updated:
+            logger.info(
+                f"Updated task {task_id} status to {status}"
+                + (f" (progress: {progress}%)" if progress else "")
+            )
+        return updated
 
     @staticmethod
     async def get_user_tasks(

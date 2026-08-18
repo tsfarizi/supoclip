@@ -2,6 +2,7 @@
 Task service - orchestrates task creation and processing workflow.
 """
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional, Callable, List
 import logging
@@ -16,6 +17,7 @@ from ..repositories.task_repository import TaskRepository
 from ..repositories.source_repository import SourceRepository
 from ..repositories.clip_repository import ClipRepository
 from ..repositories.cache_repository import CacheRepository
+from .billing_service import BillingService
 from .clip_render_service import ClipRenderService
 from .video_service import VideoService
 from .task_completion_email_service import (
@@ -28,6 +30,7 @@ from ..errors import (
     AnalysisError,
     CancelledError,
     DownloadError,
+    DuplicateTaskError,
     RenderError,
     TaskProcessingError,
     TranscriptionError,
@@ -43,6 +46,7 @@ from ..clip_editor import (
 from ..video_utils import parse_timestamp_to_seconds
 from ..transition_engine import apply_transitions_between_clips
 from ..clip_cleanup import normalize_clip_cleanup_settings
+from ..task_validation import clamp_sound_effects_count
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
 from ..clip_source_map import (
     load_clip_source_ranges,
@@ -144,6 +148,15 @@ class TaskService:
     ) -> str:
         """
         Create a new task with associated source.
+
+        The source, the task, and (when monetization is enabled) the billing
+        reservation commit in one atomic transaction: the user's billing row is
+        locked with ``SELECT ... FOR UPDATE``, then the source and task rows are
+        inserted, then the transaction commits once. Concurrent submissions of
+        the same video are resolved by the partial unique index on
+        ``tasks.source_identity``: the loser raises :class:`DuplicateTaskError`
+        and its whole transaction is rolled back.
+
         Returns the task ID.
         """
         # Validate user exists
@@ -160,31 +173,63 @@ class TaskService:
             else:
                 title = "Uploaded Video"
 
-        # Create source
-        source_id = await self.source_repo.create_source(
-            self.db, source_type=source_type, title=title, url=url
-        )
+        source_identity = normalize_video_identity(url) or None
 
-        # Create task
-        task_id = await self.task_repo.create_task(
-            self.db,
-            user_id=user_id,
-            source_id=source_id,
-            status="queued",  # Changed from "processing" to "queued"
-            font_family=font_family,
-            font_size=font_size,
-            font_color=font_color,
-            caption_template=caption_template,
-            include_broll=include_broll,
-            sound_effects_count=sound_effects_count,
-            processing_mode=processing_mode,
-            output_format=output_format,
-            add_subtitles=add_subtitles,
-            hook_persist=hook_persist,
-            watermark=watermark,
-            watermark_persist=watermark_persist,
-            cleanup_settings_json=cleanup_settings,
-        )
+        try:
+            # Billing reservation must run inside the same transaction as the
+            # inserts: the row lock serializes concurrent creators and the
+            # re-count sees every committed task of the window.
+            if self.config.monetization_enabled:
+                billing_service = BillingService(self.db, self.config)
+                await billing_service.assert_can_create_task_locked(user_id)
+
+            # Create source and task with commit=False so one commit at the end
+            # makes the reservation + source + task atomic.
+            source_id = await self.source_repo.create_source(
+                self.db, source_type=source_type, title=title, url=url, commit=False
+            )
+            task_id = await self.task_repo.create_task(
+                self.db,
+                user_id=user_id,
+                source_id=source_id,
+                status="queued",  # Changed from "processing" to "queued"
+                font_family=font_family,
+                font_size=font_size,
+                font_color=font_color,
+                caption_template=caption_template,
+                include_broll=include_broll,
+                sound_effects_count=sound_effects_count,
+                processing_mode=processing_mode,
+                output_format=output_format,
+                add_subtitles=add_subtitles,
+                hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
+                cleanup_settings_json=cleanup_settings,
+                source_identity=source_identity,
+                commit=False,
+            )
+            await self.db.commit()
+        except IntegrityError as exc:
+            # The partial unique index on source_identity rejected a concurrent
+            # duplicate submission (or a leftover non-terminal row with the
+            # same identity). Roll back the aborted transaction and surface the
+            # domain-level duplicate signal to the route.
+            await self.db.rollback()
+            logger.info(
+                "Duplicate submission rejected for source_identity=%s user=%s",
+                source_identity,
+                user_id,
+            )
+            raise DuplicateTaskError(
+                "Video ini sedang diproses. "
+                "Tunggu hingga selesai sebelum memproses video yang sama lagi."
+            ) from exc
+        except Exception:
+            # Any other failure (billing limit, DB error) must not leave the
+            # source/task rows or the billing row lock behind.
+            await self.db.rollback()
+            raise
 
         logger.info(f"Created task {task_id} for user {user_id}")
         return task_id
@@ -227,27 +272,31 @@ class TaskService:
         """
         Process a task: download video, analyze, create clips.
         Returns processing results.
+
+        Orchestrates four bounded stages in a fixed order:
+        prepare -> pipeline -> (cache upsert) -> render -> notify. Error
+        classification is type-driven only: every failure must surface as a
+        typed error from the stage that produced it; the generic handler
+        persists ``task_error`` without inspecting the message text.
         """
         try:
-            try:
-                sound_effects_count = max(0, min(5, int(sound_effects_count)))
-            except (TypeError, ValueError):
-                sound_effects_count = 0
             logger.info(f"Starting processing for task {task_id}")
             started_at = datetime.utcnow()
             stage_timings: Dict[str, float] = {}
-            cache_key = self._build_cache_key(
-                url, source_type, processing_mode, include_broll, sound_effects_count
-            )
 
-            cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
-            cached_transcript = (
-                cache_entry.get("transcript_text") if cache_entry else None
+            prepared = await self._prepare_stage(
+                task_id=task_id,
+                url=url,
+                source_type=source_type,
+                processing_mode=processing_mode,
+                include_broll=include_broll,
+                sound_effects_count=sound_effects_count,
             )
-            cached_analysis_json = (
-                cache_entry.get("analysis_json") if cache_entry else None
-            )
-            cache_hit = bool(cached_transcript and cached_analysis_json)
+            sound_effects_count = prepared["sound_effects_count"]
+            cache_key = prepared["cache_key"]
+            cache_hit = prepared["cache_hit"]
+            cached_transcript = prepared["cached_transcript"]
+            cached_analysis_json = prepared["cached_analysis_json"]
 
             await self.task_repo.update_task_runtime_metadata(
                 self.db,
@@ -256,32 +305,39 @@ class TaskService:
                 cache_hit=cache_hit,
             )
 
-            # Update status to processing
-            await self.task_repo.update_task_status(
+            # Update status to processing. The CAS guard aborts stale worker
+            # jobs: a task that left queued/error (cancelled, completed, or
+            # already terminal) must never start the pipeline again.
+            transitioned = await self.task_repo.update_task_status(
                 self.db,
                 task_id,
                 "processing",
+                expected_statuses=["queued", "error"],
                 progress=0,
                 progress_message="Starting...",
             )
+            if not transitioned:
+                logger.warning(
+                    "Task %s is no longer queued/error; refusing to start processing",
+                    task_id,
+                )
+                raise CancelledError(
+                    "Task was cancelled or completed before processing could start"
+                )
 
-            # Progress callback wrapper
+            # Progress callback wrapper: real-time channel only. The tasks row
+            # is a sparse checkpoint log; per-tick writes are dropped so DB
+            # traffic scales with checkpoints (start / per-clip / terminal),
+            # never with tick volume from the video pipeline.
             async def update_progress(
                 progress: int, message: str, status: str = "processing"
             ):
-                await self.task_repo.update_task_status(
-                    self.db,
-                    task_id,
-                    status,
-                    progress=progress,
-                    progress_message=message,
-                )
                 if progress_callback:
                     await progress_callback(progress, message, status)
 
             # Process video with progress updates
             pipeline_start = perf_counter()
-            result = await self.video_service.process_video_complete(
+            result = await self._pipeline_stage(
                 url=url,
                 source_type=source_type,
                 task_id=task_id,
@@ -335,118 +391,32 @@ class TaskService:
                 sound_effects_count=sound_effects_count,
             )
 
-            video_path = Path(result["video_path"])
-            total_clips = len(segments_to_render)
-            clips_output_dir = Path(self.config.temp_dir) / "clips"
-            clips_output_dir.mkdir(parents=True, exist_ok=True)
-
-            clip_ids = []
-            render_start = perf_counter()
-
-            for i, segment in enumerate(segments_to_render):
-                # Check cancellation
-                if should_cancel and await should_cancel():
-                    raise CancelledError("Task cancelled")
-
-                # Update progress: 70-95% spread across clips
-                clip_progress = 70 + int(
-                    ((i + 1) / total_clips) * 25
-                ) if total_clips > 0 else 95
-                await update_progress(
-                    clip_progress,
-                    f"Creating clip {i + 1}/{total_clips}...",
-                )
-
-                # Render single clip in thread pool
-                clip_info = await self.video_service.create_single_clip(
-                    video_path,
-                    segment,
-                    i,
-                    clips_output_dir,
-                    font_family,
-                    font_size,
-                    font_color,
-                    caption_template,
-                    output_format,
-                    add_subtitles,
-                    normalized_cleanup_settings,
-                    hook_persist=hook_persist,
-                    watermark=watermark,
-                    watermark_persist=watermark_persist,
-                    task_id=task_id,
-                    sound_effects_count=sound_effects_count,
-                )
-                if clip_info is None:
-                    continue  # Skip failed clip
-
-                # Save to DB immediately
-                clip_id = await self.clip_repo.create_clip(
-                    self.db,
-                    task_id=task_id,
-                    filename=clip_info["filename"],
-                    file_path=clip_info["path"],
-                    start_time=clip_info["start_time"],
-                    end_time=clip_info["end_time"],
-                    duration=clip_info["duration"],
-                    text=clip_info.get("text", ""),
-                    relevance_score=clip_info.get("relevance_score", 0.0),
-                    reasoning=clip_info.get("reasoning", ""),
-                    clip_order=i + 1,
-                    virality_score=clip_info.get("virality_score", 0),
-                    hook_score=clip_info.get("hook_score", 0),
-                    engagement_score=clip_info.get("engagement_score", 0),
-                    value_score=clip_info.get("value_score", 0),
-                    shareability_score=clip_info.get("shareability_score", 0),
-                    hook_type=clip_info.get("hook_type"),
-                    hook_title=clip_info.get("hook_title"),
-                )
-                # ClipRepository.create_clip owns its commit (it mirrors
-                # TaskRepository.create_task); no second commit here so the
-                # caller never commits across the repository's boundary.
-                clip_ids.append(clip_id)
-
-                # Update task's clip IDs array
-                await self.task_repo.update_task_clips(self.db, task_id, clip_ids)
-
-                # Notify frontend via SSE
-                if clip_ready_callback:
-                    clip_record = await self.clip_repo.get_clip_by_id(
-                        self.db, clip_id
-                    )
-                    if clip_record:
-                        await clip_ready_callback(i, total_clips, clip_record)
-
-            stage_timings["render_seconds"] = round(
-                perf_counter() - render_start, 3
-            )
-
-            if not clip_ids:
-                raise RenderError(
-                    "Clip rendering failed for all segments; no clips were produced"
-                )
-
-            # Mark as completed
-            await self.task_repo.update_task_status(
-                self.db,
-                task_id,
-                "completed",
-                progress=100,
-                progress_message="Complete!",
-            )
-
-            if progress_callback:
-                await progress_callback(100, "Complete!", "completed")
-
-            await self.task_repo.update_task_runtime_metadata(
-                self.db,
-                task_id,
-                completed_at=datetime.utcnow(),
-                stage_timings_json=json.dumps(stage_timings),
-                error_code="",
-            )
-            await self._send_completion_notification_if_needed(
+            clip_ids, render_seconds = await self._render_stage(
                 task_id=task_id,
-                clips_count=len(clip_ids),
+                result=result,
+                segments_to_render=segments_to_render,
+                font_family=font_family,
+                font_size=font_size,
+                font_color=font_color,
+                caption_template=caption_template,
+                output_format=output_format,
+                add_subtitles=add_subtitles,
+                normalized_cleanup_settings=normalized_cleanup_settings,
+                hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
+                sound_effects_count=sound_effects_count,
+                should_cancel=should_cancel,
+                update_progress=update_progress,
+                clip_ready_callback=clip_ready_callback,
+            )
+            stage_timings["render_seconds"] = render_seconds
+
+            await self._notify_stage(
+                task_id=task_id,
+                clip_ids=clip_ids,
+                stage_timings=stage_timings,
+                progress_callback=progress_callback,
             )
 
             logger.info(
@@ -479,8 +449,8 @@ class TaskService:
                 error_code = "transcription_error"
             elif isinstance(e, AnalysisError):
                 error_code = "analysis_error"
-            elif isinstance(e, RenderError):
-                error_code = "task_error"
+            # RenderError maps to task_error; any other typed pipeline failure
+            # (or an unclassified TaskProcessingError) also persists task_error.
 
             await self._persist_terminal_status(
                 task_id=task_id,
@@ -490,25 +460,288 @@ class TaskService:
             )
             raise
         except Exception as e:
+            # Unknown exception: no message-text guessing. The source layers
+            # are responsible for raising typed errors; anything reaching here
+            # is genuinely unclassified and persists as task_error.
             logger.error(f"Error processing task {task_id}: {e}")
-            error_code = "task_error"
-            message = str(e).lower()
-            if "download" in message or "youtube" in message:
-                error_code = "download_error"
-            elif "analysis" in message:
-                error_code = "analysis_error"
-            elif "transcript" in message:
-                error_code = "transcription_error"
-            elif "cancelled" in message:
-                error_code = "cancelled"
-
             await self._persist_terminal_status(
                 task_id=task_id,
                 status="error",
                 progress_message=str(e),
-                error_code=error_code,
+                error_code="task_error",
             )
             raise
+
+    async def _prepare_stage(
+        self,
+        *,
+        task_id: str,
+        url: str,
+        source_type: str,
+        processing_mode: str,
+        include_broll: bool,
+        sound_effects_count: int,
+    ) -> Dict[str, Any]:
+        """Prepare inputs for the pipeline: normalize the sfx count, build the
+        transcript cache key, and read the cache entry.
+
+        Output contract: returns ``sound_effects_count`` (clamped 0-5),
+        ``cache_key``, ``cache_hit``, ``cached_transcript``, and
+        ``cached_analysis_json``. Pure read of the cache; no status writes.
+        """
+        sound_effects_count = clamp_sound_effects_count(sound_effects_count)
+        cache_key = self._build_cache_key(
+            url, source_type, processing_mode, include_broll, sound_effects_count
+        )
+        cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+        cached_transcript = (
+            cache_entry.get("transcript_text") if cache_entry else None
+        )
+        cached_analysis_json = (
+            cache_entry.get("analysis_json") if cache_entry else None
+        )
+        cache_hit = bool(cached_transcript and cached_analysis_json)
+        return {
+            "sound_effects_count": sound_effects_count,
+            "cache_key": cache_key,
+            "cache_hit": cache_hit,
+            "cached_transcript": cached_transcript,
+            "cached_analysis_json": cached_analysis_json,
+        }
+
+    async def _pipeline_stage(
+        self,
+        *,
+        url: str,
+        source_type: str,
+        task_id: str,
+        font_family: Optional[str],
+        font_size: Optional[int],
+        font_color: Optional[str],
+        caption_template: str,
+        processing_mode: str,
+        output_format: str,
+        add_subtitles: bool,
+        include_broll: bool,
+        sound_effects_count: int,
+        cached_transcript: Optional[str],
+        cached_analysis_json: Optional[str],
+        progress_callback: Optional[Callable],
+        should_cancel: Optional[Callable],
+    ) -> Dict[str, Any]:
+        """Run the download/transcribe/analyze/segment pipeline.
+
+        Output contract: returns the ``process_video_complete`` result dict.
+        Error contract: every failure surfaces as a typed error - DownloadError,
+        TranscriptionError, AnalysisError, or CancelledError - never as a raw
+        generic exception; the video service wraps at the source.
+        """
+        return await self.video_service.process_video_complete(
+            url=url,
+            source_type=source_type,
+            task_id=task_id,
+            font_family=font_family,
+            font_size=font_size,
+            font_color=font_color,
+            caption_template=caption_template,
+            processing_mode=processing_mode,
+            output_format=output_format,
+            add_subtitles=add_subtitles,
+            include_broll=include_broll,
+            sound_effects_count=sound_effects_count,
+            cached_transcript=cached_transcript,
+            cached_analysis_json=cached_analysis_json,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
+
+    async def _render_stage(
+        self,
+        *,
+        task_id: str,
+        result: Dict[str, Any],
+        segments_to_render: List[Dict[str, Any]],
+        font_family: Optional[str],
+        font_size: Optional[int],
+        font_color: Optional[str],
+        caption_template: str,
+        output_format: str,
+        add_subtitles: bool,
+        normalized_cleanup_settings: Dict[str, Any],
+        hook_persist: bool,
+        watermark: Optional[str],
+        watermark_persist: bool,
+        sound_effects_count: int,
+        should_cancel: Optional[Callable],
+        update_progress: Callable,
+        clip_ready_callback: Optional[Callable],
+    ) -> tuple[List[str], float]:
+        """Render clips one at a time in the P3 order: render -> create_clip
+        commit -> per-clip checkpoint CAS -> SSE publish.
+
+        Output contract: returns ``(clip_ids, render_seconds)``. A task whose
+        every segment render failed raises RenderError (zero clips); the per-clip
+        cancel check raises CancelledError. The checkpoint CAS rejection is
+        absorbed (logged) exactly as before.
+        """
+        video_path = Path(result["video_path"])
+        total_clips = len(segments_to_render)
+        clips_output_dir = Path(self.config.temp_dir) / "clips"
+        clips_output_dir.mkdir(parents=True, exist_ok=True)
+
+        clip_ids = []
+        render_start = perf_counter()
+
+        for i, segment in enumerate(segments_to_render):
+            # Check cancellation
+            if should_cancel and await should_cancel():
+                raise CancelledError("Task cancelled")
+
+            # Real-time tick (Redis only): 70-95% spread across clips
+            clip_progress = 70 + int(
+                ((i + 1) / total_clips) * 25
+            ) if total_clips > 0 else 95
+            await update_progress(
+                clip_progress,
+                f"Creating clip {i + 1}/{total_clips}...",
+            )
+
+            # Render single clip in thread pool
+            clip_info = await self.video_service.create_single_clip(
+                video_path,
+                segment,
+                i,
+                clips_output_dir,
+                font_family,
+                font_size,
+                font_color,
+                caption_template,
+                output_format,
+                add_subtitles,
+                normalized_cleanup_settings,
+                hook_persist=hook_persist,
+                watermark=watermark,
+                watermark_persist=watermark_persist,
+                task_id=task_id,
+                sound_effects_count=sound_effects_count,
+            )
+            if clip_info is None:
+                continue  # Skip failed clip
+
+            # Save to DB immediately
+            clip_id = await self.clip_repo.create_clip(
+                self.db,
+                task_id=task_id,
+                filename=clip_info["filename"],
+                file_path=clip_info["path"],
+                start_time=clip_info["start_time"],
+                end_time=clip_info["end_time"],
+                duration=clip_info["duration"],
+                text=clip_info.get("text", ""),
+                relevance_score=clip_info.get("relevance_score", 0.0),
+                reasoning=clip_info.get("reasoning", ""),
+                clip_order=i + 1,
+                virality_score=clip_info.get("virality_score", 0),
+                hook_score=clip_info.get("hook_score", 0),
+                engagement_score=clip_info.get("engagement_score", 0),
+                value_score=clip_info.get("value_score", 0),
+                shareability_score=clip_info.get("shareability_score", 0),
+                hook_type=clip_info.get("hook_type"),
+                hook_title=clip_info.get("hook_title"),
+            )
+            # ClipRepository.create_clip owns its commit (it mirrors
+            # TaskRepository.create_task); no second commit here so the
+            # caller never commits across the repository's boundary.
+            clip_ids.append(clip_id)
+
+            # Checkpoint: persist progress only after the clip row is
+            # committed, so the DB progress column never leads the clip
+            # list. The CAS guard rejects the write if the task left
+            # processing concurrently (cancelled/errored); the loop's
+            # should_cancel check and the terminal CAS absorb that outcome.
+            checkpointed = await self.task_repo.update_task_status(
+                self.db,
+                task_id,
+                "processing",
+                expected_statuses=["processing"],
+                progress=clip_progress,
+                progress_message=(
+                    f"Creating clip {i + 1}/{total_clips}..."
+                ),
+            )
+            if not checkpointed:
+                logger.warning(
+                    "Per-clip checkpoint rejected for task %s: "
+                    "no longer processing",
+                    task_id,
+                )
+
+            # Notify frontend via SSE
+            if clip_ready_callback:
+                clip_record = await self.clip_repo.get_clip_by_id(
+                    self.db, clip_id
+                )
+                if clip_record:
+                    await clip_ready_callback(i, total_clips, clip_record)
+
+        render_seconds = round(perf_counter() - render_start, 3)
+
+        if not clip_ids:
+            raise RenderError(
+                "Clip rendering failed for all segments; no clips were produced"
+            )
+
+        return clip_ids, render_seconds
+
+    async def _notify_stage(
+        self,
+        *,
+        task_id: str,
+        clip_ids: List[str],
+        stage_timings: Dict[str, float],
+        progress_callback: Optional[Callable],
+    ) -> None:
+        """Finish the task: completion CAS, final progress tick, terminal
+        runtime metadata, and the completion email.
+
+        Contract: the completed CAS must win (a rejected CAS means the task
+        left processing concurrently and raises CancelledError so no
+        completion notification is emitted). Email failure is logged, never
+        propagated.
+        """
+        # Mark as completed. If the CAS is rejected the task left
+        # processing (cancelled or errored by another writer); treat the
+        # run as cancelled so no completion notification is emitted and
+        # the terminal status already on the row is never overwritten.
+        completed = await self.task_repo.update_task_status(
+            self.db,
+            task_id,
+            "completed",
+            expected_statuses=["processing"],
+            progress=100,
+            progress_message="Complete!",
+        )
+        if not completed:
+            logger.warning(
+                "Completion CAS rejected for task %s: status changed from processing",
+                task_id,
+            )
+            raise CancelledError("Task was cancelled while processing")
+
+        if progress_callback:
+            await progress_callback(100, "Complete!", "completed")
+
+        await self.task_repo.update_task_runtime_metadata(
+            self.db,
+            task_id,
+            completed_at=datetime.utcnow(),
+            stage_timings_json=json.dumps(stage_timings),
+            error_code="",
+        )
+        await self._send_completion_notification_if_needed(
+            task_id=task_id,
+            clips_count=len(clip_ids),
+        )
 
     async def _persist_terminal_status(
         self,
@@ -536,13 +769,22 @@ class TaskService:
             # masking the original error. Rollback is a no-op on a clean
             # session, so this cannot discard committed work.
             await self.db.rollback()
-            await self.task_repo.update_task_status(
+            updated = await self.task_repo.update_task_status(
                 self.db,
                 task_id,
                 status,
+                expected_statuses=["queued", "processing"],
                 progress=0,
                 progress_message=progress_message,
             )
+            if not updated:
+                logger.warning(
+                    "Terminal status %s rejected for task %s: "
+                    "task is not in queued/processing state",
+                    status,
+                    task_id,
+                )
+                return
             if error_code is not None:
                 await self.task_repo.update_task_runtime_metadata(
                     self.db,
@@ -633,7 +875,7 @@ class TaskService:
             for clip in clips
         ]
         task["clips_count"] = len(clips)
-        task.update(await self._load_task_source_settings(task))
+        task.update(await self._load_task_render_settings(task))
         task["sfx_attribution"] = []
         task["sfx_degraded"] = False
         for clip_record, clip in zip(clips, task["clips"]):
@@ -804,7 +1046,7 @@ class TaskService:
 
         source_url = task.get("source_url")
         source_type = task.get("source_type")
-        metadata = await self._load_task_source_settings(task)
+        metadata = await self._load_task_render_settings(task)
         output_format = metadata.get("output_format", "vertical")
         persisted_sound_effects_count = task.get("sound_effects_count")
         if persisted_sound_effects_count is None:
@@ -928,9 +1170,8 @@ class TaskService:
 
         await self.clip_repo.delete_clips_by_task(self.db, task_id)
 
-        clip_ids = []
         for i, clip_info in enumerate(clips_info):
-            clip_id = await self.clip_repo.create_clip(
+            await self.clip_repo.create_clip(
                 self.db,
                 task_id=task_id,
                 filename=clip_info["filename"],
@@ -951,9 +1192,6 @@ class TaskService:
                 hook_type=clip_info.get("hook_type"),
                 hook_title=clip_info.get("hook_title"),
             )
-            clip_ids.append(clip_id)
-
-        await self.task_repo.update_task_clips(self.db, task_id, clip_ids)
 
     async def trim_clip(
         self,
@@ -1018,7 +1256,7 @@ class TaskService:
         end_seconds = parse_timestamp_to_seconds(clip["end_time"])
         return [(start_seconds, end_seconds)]
 
-    async def _load_task_source_settings(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        # Delegation keeps the historical method name stable for callers and
-        # characterization tests; the logic lives in TaskMetadataService.
+    async def _load_task_render_settings(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        # Delegation keeps the historical method name stable for callers; the
+        # logic lives in TaskMetadataService.
         return await self.metadata.load_source_settings(task)

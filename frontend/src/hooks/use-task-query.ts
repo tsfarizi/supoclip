@@ -7,7 +7,6 @@ import { Clip, TaskDetails } from "@/lib/task-types";
 
 export interface UseTaskQueryOptions {
   retryOn404?: boolean;
-  mergeIncremental?: boolean;
 }
 
 export function useTaskQuery(
@@ -21,7 +20,6 @@ export function useTaskQuery(
   refresh: () => Promise<void>;
 } {
   const retryOn404 = options?.retryOn404 ?? false;
-  const mergeIncremental = options?.mergeIncremental ?? false;
 
   const [task, setTask] = useState<TaskDetails | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
@@ -62,20 +60,13 @@ export function useTaskQuery(
       const nextClips = body.clips ?? [];
 
       setTask(nextTask);
-      setClips((current) => {
-        // SSE incremental rendering may already hold more clips than the
-        // persisted snapshot; keep the longer list so UI clips never shrink.
-        if (mergeIncremental && nextClips.length < current.length) {
-          return current;
-        }
-        return nextClips;
-      });
+      setClips(nextClips);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load task");
     } finally {
       setIsLoading(false);
     }
-  }, [taskId, retryOn404, mergeIncremental]);
+  }, [taskId, retryOn404]);
 
   useEffect(() => {
     if (!taskId) return;

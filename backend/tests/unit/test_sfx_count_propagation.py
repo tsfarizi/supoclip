@@ -12,6 +12,11 @@ import pytest
 from src.api.routes import tasks as tasks_route
 
 
+# Captured create_task_with_source kwargs: proves the tasks-column persistence
+# boundary of the create route.
+created = {}
+
+
 class _Request:
     def __init__(self, payload=None):
         self._payload = payload or {}
@@ -31,7 +36,8 @@ class _CreateTaskService:
     async def find_active_task_for_source(self, _url):
         return None
 
-    async def create_task_with_source(self, **_kwargs):
+    async def create_task_with_source(self, **kwargs):
+        created.update(kwargs)
         return "task-created"
 
 
@@ -45,11 +51,14 @@ class _BillingService:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", range(6))
-async def test_create_persists_and_enqueues_each_valid_sfx_count(monkeypatch, count):
-    """Create contract: persisted 0..5 is included in both cache metadata and job args."""
+async def test_create_passes_each_valid_sfx_count_to_persistence_and_enqueue(
+    monkeypatch, count
+):
+    """Create contract: the API-facing 0..5 is persisted (create_task_with_source
+    column args) and forwarded unchanged to the worker job args."""
     request = _Request({"source": {"url": "https://youtu.be/demo"}, "sound_effects_count": count})
     queued = {}
-    metadata = {}
+    created.clear()
 
     class _Queue:
         @staticmethod
@@ -61,17 +70,13 @@ async def test_create_persists_and_enqueues_each_valid_sfx_count(monkeypatch, co
     monkeypatch.setattr(tasks_route, "_get_user_id_from_headers", AsyncMock(return_value="user-1"))
     monkeypatch.setattr(tasks_route, "BillingService", _BillingService)
     monkeypatch.setattr(tasks_route, "TaskService", _CreateTaskService)
-    monkeypatch.setattr(
-        tasks_route,
-        "_save_task_source_metadata",
-        AsyncMock(side_effect=lambda _task_id, payload: metadata.update(payload)),
-    )
 
     await tasks_route.create_task(request, object())
 
     assert queued["name"] == "process_video_task"
     assert queued["kwargs"]["sound_effects_count"] == count
-    assert metadata["sound_effects_count"] == count
+    # The tasks row (created via create_task_with_source) persists the count.
+    assert created["sound_effects_count"] == count
 
 
 class _ResumeRedis:
@@ -81,10 +86,10 @@ class _ResumeRedis:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", range(6))
-async def test_resume_passes_persisted_sfx_count_and_refreshes_cache_metadata(
-    monkeypatch, count
-):
-    """Resume contract: the task row's persisted 0..5 reaches the worker job and cache."""
+async def test_resume_passes_persisted_sfx_count_to_worker_job(monkeypatch, count):
+    """Resume contract: the task row's persisted 0..5 reaches the worker job.
+    The settings live in the tasks columns only; there is no metadata cache to
+    refresh."""
     task = {
         "id": "task-resume",
         "user_id": "user-1",
@@ -102,7 +107,6 @@ async def test_resume_passes_persisted_sfx_count_and_refreshes_cache_metadata(
     }
     request = _Request()
     queued = {}
-    metadata = {}
 
     class _TaskService:
         def __init__(self, _db):
@@ -122,18 +126,11 @@ async def test_resume_passes_persisted_sfx_count_and_refreshes_cache_metadata(
     monkeypatch.setattr(tasks_route, "JobQueue", _Queue)
     monkeypatch.setattr(tasks_route, "get_redis_client", lambda: _ResumeRedis())
     monkeypatch.setattr(tasks_route, "get_config", lambda: SimpleNamespace(default_processing_mode="fast"))
-    monkeypatch.setattr(tasks_route, "_load_task_source_metadata", AsyncMock(return_value={}))
-    monkeypatch.setattr(
-        tasks_route,
-        "_save_task_source_metadata",
-        AsyncMock(side_effect=lambda _task_id, payload: metadata.update(payload)),
-    )
 
     await tasks_route.resume_task("task-resume", request, object())
 
     assert queued["name"] == "process_video_task"
     assert queued["kwargs"]["sound_effects_count"] == count
-    assert metadata["sound_effects_count"] == count
 
 
 @pytest.mark.asyncio

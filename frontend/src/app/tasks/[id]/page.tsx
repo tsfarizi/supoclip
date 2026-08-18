@@ -369,6 +369,9 @@ export default function TaskPage() {
         setError(data.error || "Connection error");
       }
       eventSource.close();
+      // Terminal/transport failure: reconcile against the authoritative GET so
+      // the clip list never relies on SSE-accumulated state.
+      void fetchTaskStatus();
     });
 
     return () => {

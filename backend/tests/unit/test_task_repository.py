@@ -129,7 +129,6 @@ async def test_create_task_round_trip_persists_all_fields(db_session):
         assert task["processing_mode"] == "fast"
         # Newly created rows get the column server defaults.
         assert task["progress"] == 0
-        assert task["generated_clips_ids"] is None
     finally:
         await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
 
@@ -283,7 +282,12 @@ async def test_update_task_status_persists_status_progress_and_message(db_sessio
     task_id = await TaskRepository.create_task(db_session, user_id=user_id, source_id=source_id, status="processing")
     try:
         await TaskRepository.update_task_status(
-            db_session, task_id, "completed", progress=87, progress_message="Rendering final"
+            db_session,
+            task_id,
+            "completed",
+            expected_statuses=["processing"],
+            progress=87,
+            progress_message="Rendering final",
         )
         task = await TaskRepository.get_task_by_id(db_session, task_id)
         assert task["status"] == "completed"
@@ -300,9 +304,16 @@ async def test_update_task_status_without_progress_keeps_previous_progress_and_m
     task_id = await TaskRepository.create_task(db_session, user_id=user_id, source_id=source_id, status="processing")
     try:
         await TaskRepository.update_task_status(
-            db_session, task_id, "processing", progress=50, progress_message="Halfway"
+            db_session,
+            task_id,
+            "processing",
+            expected_statuses=["processing"],
+            progress=50,
+            progress_message="Halfway",
         )
-        await TaskRepository.update_task_status(db_session, task_id, "completed")
+        await TaskRepository.update_task_status(
+            db_session, task_id, "completed", expected_statuses=["processing"]
+        )
         task = await TaskRepository.get_task_by_id(db_session, task_id)
         assert task["status"] == "completed"
         # progress/progress_message are only written when not None.
@@ -318,7 +329,9 @@ async def test_update_task_status_persists_explicit_zero_progress(db_session):
     source_id = await _seed_source(db_session)
     task_id = await TaskRepository.create_task(db_session, user_id=user_id, source_id=source_id, status="processing")
     try:
-        await TaskRepository.update_task_status(db_session, task_id, "processing", progress=0)
+        await TaskRepository.update_task_status(
+            db_session, task_id, "processing", expected_statuses=["processing"], progress=0
+        )
         task = await TaskRepository.get_task_by_id(db_session, task_id)
         assert task["progress"] == 0
     finally:
@@ -492,24 +505,6 @@ async def test_update_task_settings_persists_watermark_and_persist(db_session):
 
 
 # ---------------------------------------------------------------------------
-# update_task_clips
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_update_task_clips_persists_generated_clip_ids(db_session):
-    user_id = await _seed_user(db_session)
-    source_id = await _seed_source(db_session)
-    task_id = await TaskRepository.create_task(db_session, user_id=user_id, source_id=source_id)
-    clip_ids = [str(uuid4()) for _ in range(3)]
-    try:
-        await TaskRepository.update_task_clips(db_session, task_id, clip_ids)
-        task = await TaskRepository.get_task_by_id(db_session, task_id)
-        assert task["generated_clips_ids"] == clip_ids
-    finally:
-        await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])
-
-
-# ---------------------------------------------------------------------------
 # enable_sharing / disable_sharing / get_shared_task_id
 # ---------------------------------------------------------------------------
 
@@ -575,7 +570,9 @@ async def test_get_shared_task_id_only_resolves_completed_tasks(db_session):
         await TaskRepository.enable_sharing(db_session, task_id, token)
         # share_enabled is TRUE but status is not 'completed' -> unresolvable.
         assert await TaskRepository.get_shared_task_id(db_session, token) is None
-        await TaskRepository.update_task_status(db_session, task_id, "completed")
+        await TaskRepository.update_task_status(
+            db_session, task_id, "completed", expected_statuses=["processing"]
+        )
         assert await TaskRepository.get_shared_task_id(db_session, token) == task_id
     finally:
         await _cleanup(db_session, user_ids=[user_id], source_ids=[source_id])

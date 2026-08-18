@@ -1,8 +1,6 @@
 import os
-from pathlib import Path
 
 from dotenv import load_dotenv
-from sqlalchemy import text
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -23,44 +21,6 @@ _engine_override: AsyncEngine | None = None
 _session_maker_override: async_sessionmaker[AsyncSession] | None = None
 _engine: AsyncEngine | None = None
 _session_maker: async_sessionmaker[AsyncSession] | None = None
-
-
-def _split_migration_statements(sql: str) -> list[str]:
-    """Split SQL without breaking dollar-quoted PostgreSQL procedural blocks."""
-    statements: list[str] = []
-    start = 0
-    dollar_tag: str | None = None
-    index = 0
-    while index < len(sql):
-        if dollar_tag is not None:
-            if sql.startswith(dollar_tag, index):
-                index += len(dollar_tag)
-                dollar_tag = None
-            else:
-                index += 1
-            continue
-
-        if sql[index] == "$":
-            end = sql.find("$", index + 1)
-            if end != -1:
-                tag = sql[index + 1 : end]
-            else:
-                tag = ""
-            if end != -1 and (not tag or tag.replace("_", "").isalnum()):
-                dollar_tag = sql[index : end + 1]
-                index = end + 1
-                continue
-        if sql[index] == ";":
-            statement = sql[start:index].strip()
-            if statement:
-                statements.append(statement)
-            start = index + 1
-        index += 1
-
-    statement = sql[start:].strip()
-    if statement:
-        statements.append(statement)
-    return statements
 
 
 # Base class for all models
@@ -155,42 +115,17 @@ async def get_db():
 
 # Initialize database
 async def init_db():
-    async with get_engine().begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version VARCHAR(255) PRIMARY KEY,
-                    applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-        )
+    """Bring the schema to head via Alembic migrations (async).
 
-        migrations_dir = Path(__file__).parent / "migrations" / "sql"
-        if migrations_dir.exists():
-            files = sorted([p for p in migrations_dir.glob("*.sql") if p.is_file()])
-            for migration_file in files:
-                version = migration_file.name
-                already_applied = await conn.execute(
-                    text(
-                        "SELECT 1 FROM schema_migrations WHERE version = :version LIMIT 1"
-                    ),
-                    {"version": version},
-                )
-                if already_applied.scalar() is not None:
-                    continue
+    Alembic is the single migration authority; the legacy SQL runner and the
+    schema_migrations ledger are no longer used. The baseline revision is a
+    guarded schema snapshot, so `upgrade head` is a no-op on databases already
+    migrated by the old runner (data untouched) and still converges fresh or
+    partially-migrated databases to the same schema.
+    """
+    from src.migrations.alembic.env import run_upgrade_head
 
-                sql = migration_file.read_text()
-                # asyncpg doesn't support multiple statements in one execute(),
-                # so split on semicolons and run each statement individually
-                for statement in _split_migration_statements(sql):
-                    await conn.execute(text(statement))
-                await conn.execute(
-                    text("INSERT INTO schema_migrations (version) VALUES (:version)"),
-                    {"version": version},
-                )
+    await run_upgrade_head()
 
 
 # Close database connections
