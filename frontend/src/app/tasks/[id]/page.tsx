@@ -986,7 +986,7 @@ export default function TaskPage() {
                   <Card key={clip.id} className="overflow-hidden">
                     <CardContent className="p-0">
                       <div className="flex flex-col lg:flex-row">
-                        <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
+                        <div className="relative shrink-0 bg-black rounded-lg overflow-hidden m-3">
                           <DynamicVideoPlayer src={getClipUrl(clip.video_url)} poster="/placeholder-video.jpg" />
                         </div>
                         <div className="p-6 flex-1">
@@ -1333,7 +1333,7 @@ export default function TaskPage() {
                 <CardContent className="p-0">
                   <div className="flex flex-col lg:flex-row">
                     {/* Video Player */}
-                    <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
+                    <div className="relative shrink-0 bg-black rounded-lg overflow-hidden m-3">
                       <DynamicVideoPlayer src={getClipUrl(clip.video_url)} poster="/placeholder-video.jpg" />
                     </div>
 
@@ -1468,7 +1468,7 @@ export default function TaskPage() {
                             <SelectTrigger
                               size="sm"
                               aria-label="Download format"
-                              className="h-8 min-w-[112px] rounded-none border-0 border-l border-input shadow-none focus-visible:ring-0 focus-visible:border-input bg-transparent"
+                              className="h-8 min-w-28 rounded-none border-0 border-l border-input shadow-none focus-visible:ring-0 focus-visible:border-input bg-transparent"
                             >
                               <SelectValue />
                             </SelectTrigger>
