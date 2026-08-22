@@ -17,7 +17,7 @@ class AsrConfig:
         self.asr_model = os.getenv("ASR_MODEL", "Qwen/Qwen3-ASR-1.7B")
         self.asr_aligner = os.getenv("ASR_ALIGNER", "Qwen/Qwen3-ForcedAligner-0.6B")
         self.port = int(os.getenv("ASR_PORT", "8765"))
-        self.request_timeout_seconds = int(os.getenv("ASR_REQUEST_TIMEOUT_SECONDS", "600"))
+        self.request_timeout_seconds = int(os.getenv("ASR_REQUEST_TIMEOUT_SECONDS", "1800"))
         self.max_audio_mb = int(os.getenv("MAX_AUDIO_MB", "64"))
         self.fake_model = _parse_bool(os.getenv("ASR_FAKE_MODEL", "0"))
         self.model_cache_dir = os.getenv("HF_HOME", "/models")

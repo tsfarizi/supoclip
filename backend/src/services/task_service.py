@@ -332,6 +332,19 @@ class TaskService:
             async def update_progress(
                 progress: int, message: str, status: str = "processing"
             ):
+                # Checkpoint pipeline stage progress to DB for polling fallback: without this, polling would stay at "Starting..." for minutes during slow downloads (P3 sparse DB + SSE miss = stuck UI)
+                if status != "processing" or progress in (10, 30, 50):
+                    try:
+                        await self.task_repo.update_task_status(
+                            self.db,
+                            task_id,
+                            status,
+                            expected_statuses=["processing"],
+                            progress=progress,
+                            progress_message=message,
+                        )
+                    except Exception:
+                        pass
                 if progress_callback:
                     await progress_callback(progress, message, status)
 

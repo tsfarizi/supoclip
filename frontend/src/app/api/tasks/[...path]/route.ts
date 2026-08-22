@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { createProxyResponse, fetchBackend } from "@/server/backend-api";
 import { getServerSession } from "@/server/session";
 
+export const dynamic = "force-dynamic";
+
 async function proxyTaskRequest(
   request: Request,
   { params }: { params: Promise<{ path: string[] }> }

@@ -84,6 +84,17 @@ class YouTubeDownloader:
             "nocheckcertificate": True,
             "prefer_insecure": False,
             "age_limit": None,
+            # YouTube anti-bot bypass — solve JS challenges via deno (no Apify needed)
+            # Requires deno on PATH (provided by proto) and one-time EJS fetch from GitHub.
+            "remote_components": ["ejs:github"],
+            "extractor_args": {
+                "youtube": {
+                    # Try multiple player clients; android often bypasses web challenge, web/mweb cover the rest
+                    "player_client": ["android", "web", "ios", "mweb"],
+                    # Let EJS handle the JS challenge instead of failing early
+                    "player_skip": ["webpage"],
+                }
+            },
         }
 
         return opts
@@ -103,6 +114,13 @@ def _build_info_options() -> Dict[str, Any]:
             "Connection": "keep-alive",
         },
         "nocheckcertificate": True,
+        # Allow JS challenge solving for metadata as well (some videos hide behind challenge)
+        "remote_components": ["ejs:github"],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
     }
     return ydl_opts
 

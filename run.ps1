@@ -173,8 +173,14 @@ $savedDbUrl = $env:DATABASE_URL
 $env:DATABASE_URL = 'postgresql+asyncpg://supoclip:supoclip_password@localhost:5433/supoclip'
 Push-Location $backendDir
 $prevEap = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-try { & $venvPy -m alembic -c $alembicIni upgrade head 2>&1 | Select-Object -Last 5 } finally { $ErrorActionPreference = $prevEap; Pop-Location }
+$ErrorActionPreference = 'SilentlyContinue'
+try {
+    $alembicOut = & $venvPy -m alembic -c $alembicIni upgrade head 2>&1
+    $alembicOut | Select-Object -Last 5 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0 -and $alembicOut -match 'FAILED|ERROR|Traceback') {
+        $alembicOut | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+    }
+} finally { $ErrorActionPreference = $prevEap; Pop-Location }
 $env:DATABASE_URL = $savedDbUrl
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "alembic upgrade head failed; startup aborted."

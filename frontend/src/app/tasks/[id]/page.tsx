@@ -201,6 +201,9 @@ export default function TaskPage() {
 
         const taskData = await taskResponse.json();
         setTask(taskData);
+        // Sync progress UI from DB checkpoint (sparse) so polling fallback reflects DB state even when SSE ticks are missed
+        if (typeof taskData.progress === "number") setProgress(taskData.progress);
+        if (typeof taskData.progress_message === "string") setProgressMessage(taskData.progress_message);
         setProjectFontFamily(taskData.font_family ?? null);
         setProjectFontSize(typeof taskData.font_size === "number" ? taskData.font_size : null);
         setProjectFontColor(taskData.font_color ?? null);
@@ -379,6 +382,16 @@ export default function TaskPage() {
       eventSource.close();
     };
   }, [params.id, task?.status, fetchTaskStatus, taskApiUrl, triggerAutoRefresh]); // Re-run when task status changes
+
+  // Polling fallback for sparse DB checkpoints (P3): SSE is real-time, but if ticks are missed the UI would stay at "Starting..." for minutes during slow downloads
+  useEffect(() => {
+    const status = task?.status;
+    if (status !== "queued" && status !== "processing") return;
+    const id = setInterval(() => {
+      void fetchTaskStatus();
+    }, 3000);
+    return () => clearInterval(id);
+  }, [task?.status, fetchTaskStatus]);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
