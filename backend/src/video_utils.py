@@ -2604,13 +2604,33 @@ def cluster_two_face_regions(
     return {"left": left, "right": right}
 
 
-def build_pan_expression(
-    timeline: List[Dict[str, Any]], left_x: int, right_x: int, ramp: float = 0.45
-) -> str:
-    """Eased crop-x expression that glides between two speaker framings.
+def build_hard_cut_expression(keys: List[Tuple[float, int]]) -> str:
+    """Step-function crop-x expression for instant cut-to-cut switching.
 
-    Instead of snapping the crop instantly at each speaker change, this ramps
-    smoothly over ``ramp`` seconds, giving a natural camera-pan feel.
+    No lerp, no ramp — the crop jumps instantly at each keyframe time.
+    Commas are escaped for use inside a quoted filtergraph expression.
+    """
+    if not keys:
+        return "0"
+    if len(keys) == 1:
+        return str(int(keys[0][1]))
+    # Step: if(t < t1, x0, if(t < t2, x1, x2)) — no interpolation
+    expr = str(int(keys[-1][1]))
+    for i in range(len(keys) - 2, -1, -1):
+        _t0, x0 = keys[i]
+        t1, _x1 = keys[i + 1]
+        expr = f"if(lt(t\\,{t1:.3f})\\,{int(x0)}\\,{expr})"
+    return f"trunc(({expr})/2)*2"
+
+
+def build_pan_expression(
+    timeline: List[Dict[str, Any]], left_x: int, right_x: int, ramp: float = 0.0
+) -> str:
+    """Hard-cut crop-x expression that snaps instantly at speaker change.
+
+    Cut-to-cut, no camera pan — the framing jumps instantly at each
+    speaker switch time, matching the requested instant feel with no
+    visible frame movement.
     """
     if not timeline:
         return str(left_x)
@@ -2624,8 +2644,8 @@ def build_pan_expression(
         target = float(x_for(segment["speaker"]))
         if abs(target - keys[-1][1]) < 1.0:
             continue
-        keys.append((switch_t, keys[-1][1]))  # hold previous framing until switch
-        keys.append((switch_t + ramp, target))  # then ease into the new framing
+        # Hard cut: single keyframe at the exact switch time, no ramp
+        keys.append((switch_t, target))
 
     cleaned: List[Tuple[float, int]] = []
     for t, x in keys:
@@ -2635,7 +2655,7 @@ def build_pan_expression(
 
     if len(cleaned) < 2:
         return str(int(cleaned[0][1]) if cleaned else left_x)
-    return build_smooth_pan_expression(cleaned)
+    return build_hard_cut_expression(cleaned)
 
 
 def tracks_to_face_centers(tracks: List[Any]) -> List[Tuple[int, int, int, float]]:
