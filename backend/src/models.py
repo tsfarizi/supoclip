@@ -278,6 +278,17 @@ class GeneratedClip(Base):
     )
     hook_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
+    # Clip marketing metadata (description + hashtags)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    hashtags: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    metadata_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=sql_text("'pending'")
+    )
+    metadata_version: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    metadata_prompt_version: Mapped[Optional[str]] = mapped_column(
+        String(40), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

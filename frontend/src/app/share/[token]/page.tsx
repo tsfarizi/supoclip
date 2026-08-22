@@ -27,6 +27,9 @@ interface SharedClip {
   clip_order: number;
   virality_score: number;
   hook_title: string | null;
+  description?: string | null;
+  hashtags?: string[] | null;
+  metadata_status?: string | null;
 }
 
 interface SharedTask {
@@ -163,6 +166,19 @@ export default function SharedGenerationPage() {
                         </Badge>
                       </div>
                     </div>
+
+                    {clip.description || (clip.hashtags && clip.hashtags.length > 0) ? (
+                      <div className="mb-4 p-3 rounded-lg border bg-neutral-50 space-y-2" data-testid={`clip-metadata-${clip.id}`}>
+                        {clip.description ? <p className="text-sm text-neutral-800" data-testid={`clip-description-${clip.id}`}>{clip.description}</p> : null}
+                        {clip.hashtags && clip.hashtags.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5" data-testid={`clip-hashtags-${clip.id}`}>
+                            {clip.hashtags.map((tag, i) => (
+                              <span key={i} className="inline-flex px-2 py-0.5 rounded-full bg-black text-white text-xs">{tag.startsWith("#") ? tag : `#${tag}`}</span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     {clip.text ? <TranscriptPreview text={clip.text} clipTitle={clip.hook_title} /> : null}
 

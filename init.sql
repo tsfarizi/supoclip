@@ -104,6 +104,14 @@ CREATE TABLE generated_clips (
     hook_type VARCHAR(50),
     hook_title VARCHAR(200),         -- AI-written on-screen headline
 
+    -- Clip marketing metadata (per-clip description + hashtags)
+    description TEXT,
+    hashtags TEXT,                   -- JSON string '["#tag1","#tag2"]'
+    metadata_status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (metadata_status IN ('pending','ready','degraded','failed')),
+    metadata_version VARCHAR(20),
+    metadata_prompt_version VARCHAR(40),
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -206,6 +214,7 @@ CREATE INDEX idx_processing_cache_source_url ON processing_cache(source_url);
 CREATE INDEX idx_generated_clips_task_id ON generated_clips(task_id);
 CREATE INDEX idx_generated_clips_clip_order ON generated_clips(clip_order);
 CREATE INDEX idx_generated_clips_created_at ON generated_clips(created_at);
+CREATE INDEX idx_generated_clips_metadata_status ON generated_clips(metadata_status);
 CREATE INDEX idx_session_token ON session(token);
 CREATE INDEX idx_session_userId ON session("userId");
 CREATE INDEX idx_account_userId ON account("userId");

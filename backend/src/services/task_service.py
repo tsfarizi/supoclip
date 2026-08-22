@@ -641,7 +641,9 @@ class TaskService:
             if clip_info is None:
                 continue  # Skip failed clip
 
-            # Save to DB immediately
+            # Save to DB immediately (with clip marketing metadata)
+            from ..clip_metadata import CLIP_METADATA_VERSION
+
             clip_id = await self.clip_repo.create_clip(
                 self.db,
                 task_id=task_id,
@@ -661,6 +663,11 @@ class TaskService:
                 shareability_score=clip_info.get("shareability_score", 0),
                 hook_type=clip_info.get("hook_type"),
                 hook_title=clip_info.get("hook_title"),
+                description=segment.get("description") or clip_info.get("description"),
+                hashtags=segment.get("hashtags") or clip_info.get("hashtags"),
+                metadata_status=segment.get("metadata_status") or "pending",
+                metadata_version=segment.get("metadata_version") or CLIP_METADATA_VERSION,
+                metadata_prompt_version=segment.get("metadata_prompt_version") or CLIP_METADATA_VERSION,
             )
             # ClipRepository.create_clip owns its commit (it mirrors
             # TaskRepository.create_task); no second commit here so the

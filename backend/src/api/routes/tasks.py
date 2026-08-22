@@ -120,6 +120,11 @@ PUBLIC_CLIP_FIELDS = {
     "hook_type",
     "hook_title",
     "sfx",
+    "description",
+    "hashtags",
+    "metadata_status",
+    "metadata_version",
+    "metadata_prompt_version",
 }
 
 
@@ -759,6 +764,107 @@ async def update_clip_captions(
         raise HTTPException(
             status_code=500, detail=f"Error updating captions: {str(e)}"
         )
+
+
+@router.post("/{task_id}/clips/{clip_id}/metadata/regenerate")
+async def regenerate_clip_metadata(
+    task_id: str, clip_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """Regenerate per-clip description + hashtags (platform/tone aware, degraded allowed)."""
+    try:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        platform = str(payload.get("platform") or "generic").lower()
+        if platform not in ("tiktok", "reels", "shorts", "generic"):
+            platform = "generic"
+        language = str(payload.get("language") or "auto").lower()
+        if language not in ("id", "en", "auto"):
+            language = "auto"
+
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+
+        clip = await task_service.clip_repo.get_clip_by_id(db, clip_id)
+        if not clip or clip.get("task_id") != task_id:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        # Redis lock per clip
+        from ...infra.redis_client import get_sync_redis_client
+        import json as _json
+
+        redis_sync = get_sync_redis_client()
+        lock_key = f"clip_metadata_lock:{clip_id}"
+        locked = redis_sync.set(lock_key, "1", nx=True, ex=60)
+        if not locked:
+            raise HTTPException(status_code=423, detail="Clip metadata is being regenerated, try again shortly")
+
+        try:
+            from ...services.clip_metadata_service import ClipMetadataService
+
+            svc = ClipMetadataService()
+            seg = {
+                "text": clip.get("text") or "",
+                "hook_title": clip.get("hook_title"),
+                "start_time": clip.get("start_time"),
+                "end_time": clip.get("end_time"),
+            }
+            task_row = await task_service.task_repo.get_task_by_id(db, task_id)
+            key_topics = None
+            summary = None
+            if task_row:
+                # key_topics/summary not stored on task row directly; use clip reasoning as proxy
+                key_topics = None
+            md, degraded, elapsed = await svc.generate_single(
+                seg, key_topics=key_topics, summary=summary, platform=platform, language=language, clip_index=0
+            )
+            from ...clip_metadata import CLIP_METADATA_VERSION
+
+            ok = await task_service.clip_repo.update_clip_metadata(
+                db,
+                clip_id,
+                description=md.description,
+                hashtags=md.hashtags,
+                metadata_status="degraded" if degraded or md.fallback else "ready",
+                metadata_version=CLIP_METADATA_VERSION,
+                metadata_prompt_version=md.prompt_version,
+            )
+            if not ok:
+                raise HTTPException(status_code=404, detail="Clip not found")
+
+            # Publish SSE metadata_ready
+            try:
+                redis_sync.publish(
+                    f"progress:{task_id}",
+                    _json.dumps(
+                        {
+                            "task_id": task_id,
+                            "clip_id": clip_id,
+                            "event_type": "metadata_ready",
+                            "description": md.description,
+                            "hashtags": md.hashtags,
+                            "metadata_status": "degraded" if degraded or md.fallback else "ready",
+                            "platform": platform,
+                        }
+                    ),
+                )
+            except Exception:
+                pass
+
+            updated = await task_service.clip_repo.get_clip_by_id(db, clip_id)
+            return {"clip": updated, "degraded": degraded, "elapsed_seconds": elapsed}
+        finally:
+            try:
+                redis_sync.delete(lock_key)
+            except Exception:
+                pass
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error regenerating clip metadata: {e}")
+        raise HTTPException(status_code=500, detail=f"Error regenerating metadata: {str(e)}")
 
 
 @router.post("/{task_id}/clips/{clip_id}/regenerate")

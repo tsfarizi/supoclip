@@ -922,9 +922,20 @@ class VideoService:
             segments_json: List[Dict[str, Any]] = []
             for segment in raw_segments:
                 if isinstance(segment, dict):
-                    virality = segment.get("virality") or {}
-                    if hasattr(virality, "model_dump"):
-                        virality = virality.model_dump()
+                    virality = segment.get("virality")
+                    if isinstance(virality, dict) and virality:
+                        if hasattr(virality, "model_dump"):
+                            virality = virality.model_dump()
+                    else:
+                        # Flat cache format (segments_json stored with virality_score etc) — reconstruct
+                        virality = {
+                            "total_score": segment.get("virality_score", 0),
+                            "hook_score": segment.get("hook_score", 0),
+                            "engagement_score": segment.get("engagement_score", 0),
+                            "value_score": segment.get("value_score", 0),
+                            "shareability_score": segment.get("shareability_score", 0),
+                            "hook_type": segment.get("hook_type"),
+                        }
                     segments_json.append(
                         {
                             "start_time": segment.get("start_time"),
@@ -932,12 +943,12 @@ class VideoService:
                             "text": segment.get("text", ""),
                             "relevance_score": segment.get("relevance_score", 0.0),
                             "reasoning": segment.get("reasoning", ""),
-                            "virality_score": virality.get("total_score", 0),
-                            "hook_score": virality.get("hook_score", 0),
-                            "engagement_score": virality.get("engagement_score", 0),
-                            "value_score": virality.get("value_score", 0),
-                            "shareability_score": virality.get("shareability_score", 0),
-                            "hook_type": virality.get("hook_type"),
+                            "virality_score": virality.get("total_score", 0) or segment.get("virality_score", 0),
+                            "hook_score": virality.get("hook_score", 0) or segment.get("hook_score", 0),
+                            "engagement_score": virality.get("engagement_score", 0) or segment.get("engagement_score", 0),
+                            "value_score": virality.get("value_score", 0) or segment.get("value_score", 0),
+                            "shareability_score": virality.get("shareability_score", 0) or segment.get("shareability_score", 0),
+                            "hook_type": virality.get("hook_type") or segment.get("hook_type"),
                             "hook_title": segment.get("hook_title"),
                             "hook_selection": segment.get("hook_selection"),
                         }
@@ -999,6 +1010,38 @@ class VideoService:
                         runtime_config.clip_duration,
                     )
                 ]
+
+            # Clip metadata generation (description + hashtags) — degraded allowed, never fails task
+            try:
+                from ..clip_metadata import CLIP_METADATA_VERSION
+                from .clip_metadata_service import ClipMetadataService
+
+                metadata_service = ClipMetadataService()
+                metadatas, degraded, meta_elapsed = await metadata_service.generate_batch(
+                    segments_json,
+                    key_topics=relevant_parts.key_topics if relevant_parts else None,
+                    summary=relevant_parts.summary if relevant_parts else None,
+                    platform="generic",
+                    language="auto",
+                )
+                for md in metadatas:
+                    idx = md.clip_index
+                    if 0 <= idx < len(segments_json):
+                        segments_json[idx]["description"] = md.description
+                        segments_json[idx]["hashtags"] = md.hashtags
+                        segments_json[idx]["metadata_status"] = "degraded" if degraded or md.fallback else "ready"
+                        segments_json[idx]["metadata_version"] = CLIP_METADATA_VERSION
+                        segments_json[idx]["metadata_prompt_version"] = md.prompt_version
+                logger.info(
+                    "Clip metadata batch: degraded=%s elapsed=%ss for %d segments",
+                    degraded,
+                    meta_elapsed,
+                    len(metadatas),
+                )
+            except Exception as exc:
+                logger.warning("Clip metadata generation degraded: %s", exc)
+                for seg in segments_json:
+                    seg.setdefault("metadata_status", "failed")
 
             if include_broll:
                 await VideoService._attach_broll_suggestions(

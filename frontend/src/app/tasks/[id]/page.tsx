@@ -75,7 +75,6 @@ interface Clip {
   clip_order: number;
   created_at: string;
   video_url: string;
-  // Virality scores
   virality_score: number;
   hook_score: number;
   engagement_score: number;
@@ -83,6 +82,11 @@ interface Clip {
   shareability_score: number;
   hook_type?: string | null;
   hook_title?: string | null;
+  description?: string | null;
+  hashtags?: string[] | null;
+  metadata_status?: string | null;
+  metadata_version?: string | null;
+  metadata_prompt_version?: string | null;
 }
 
 interface TaskDetails {
@@ -138,6 +142,8 @@ export default function TaskPage() {
   const [exportPreset, setExportPreset] = useState("original");
   const [shareState, setShareState] = useState<"idle" | "copying" | "copied">("idle");
   const [isRevokingShare, setIsRevokingShare] = useState(false);
+  const [regeneratingMetadataId, setRegeneratingMetadataId] = useState<string | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
 
   // null means "use the caption template's own value" — mirrors the create form's contract.
   const [projectFontFamily, setProjectFontFamily] = useState<string | null>(null);
@@ -351,6 +357,25 @@ export default function TaskPage() {
             (a: Clip, b: Clip) => (a.clip_order ?? 0) - (b.clip_order ?? 0),
           );
         });
+      }
+    });
+
+    eventSource.addEventListener("metadata_ready", (e) => {
+      const data = JSON.parse(e.data);
+      console.log("🏷️ Metadata ready:", data.clip_id);
+      if (data.clip_id) {
+        setClips((prev) =>
+          prev.map((c) =>
+            c.id === data.clip_id
+              ? {
+                  ...c,
+                  description: data.description ?? c.description,
+                  hashtags: data.hashtags ?? c.hashtags,
+                  metadata_status: data.metadata_status ?? c.metadata_status,
+                }
+              : c,
+          ),
+        );
       }
     });
 
@@ -728,6 +753,46 @@ export default function TaskPage() {
       alert(revokeError instanceof Error ? revokeError.message : "Failed to disable share link");
     } finally {
       setIsRevokingShare(false);
+    }
+  };
+
+  const copyToClipboard = async (text: string, fieldKey: string) => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else {
+        const el = document.createElement("textarea");
+        el.value = text;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand("copy");
+        el.remove();
+      }
+      setCopiedField(fieldKey);
+      window.setTimeout(() => setCopiedField(null), 2000);
+    } catch {}
+  };
+
+  const handleRegenerateMetadata = async (clip: Clip, platform: string = "generic") => {
+    if (!task?.id) return;
+    setRegeneratingMetadataId(clip.id);
+    try {
+      const resp = await fetch(`${taskApiUrl}/${task.id}/clips/${clip.id}/metadata/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platform, language: "auto" }),
+      });
+      if (!resp.ok) throw new Error(await buildSupportError(resp, "Failed to regenerate metadata"));
+      const data = await resp.json();
+      const updated = data.clip;
+      if (updated) {
+        setClips((prev) => prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c)));
+      } else {
+        await fetchTaskStatus();
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to regenerate metadata");
+    } finally {
+      setRegeneratingMetadataId(null);
     }
   };
 
@@ -1460,6 +1525,91 @@ export default function TaskPage() {
                               </Badge>
                             </div>
                           )}
+                        </div>
+                      )}
+
+                      {/* Clip Marketing Metadata */}
+                      {(clip.description || (clip.hashtags && clip.hashtags.length > 0)) && (
+                        <div className="mb-4 p-3 rounded-lg border bg-linear-to-br from-stone-50 to-white space-y-3" data-testid={`clip-metadata-${clip.id}`}>
+                          {clip.description && (
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Description</span>
+                                <div className="flex items-center gap-1">
+                                  {clip.metadata_status === "degraded" && (
+                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-yellow-50 text-yellow-700 border-yellow-200">fallback</Badge>
+                                  )}
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 px-2 text-xs"
+                                    onClick={() => copyToClipboard(clip.description || "", `desc-${clip.id}`)}
+                                  >
+                                    {copiedField === `desc-${clip.id}` ? <Check className="w-3 h-3" /> : <Share2 className="w-3 h-3" />}
+                                    {copiedField === `desc-${clip.id}` ? "Copied" : "Copy"}
+                                  </Button>
+                                </div>
+                              </div>
+                              <p className="text-sm text-gray-800 leading-relaxed" data-testid={`clip-description-${clip.id}`}>{clip.description}</p>
+                            </div>
+                          )}
+                          {clip.hashtags && clip.hashtags.length > 0 && (
+                            <div>
+                              <div className="flex items-center justify-between mb-1.5">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Hashtags</span>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 px-2 text-xs"
+                                  onClick={() => copyToClipboard((clip.hashtags || []).join(" "), `tags-${clip.id}`)}
+                                >
+                                  {copiedField === `tags-${clip.id}` ? <Check className="w-3 h-3" /> : <Share2 className="w-3 h-3" />}
+                                  {copiedField === `tags-${clip.id}` ? "Copied" : "Copy all"}
+                                </Button>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5" data-testid={`clip-hashtags-${clip.id}`}>
+                                {clip.hashtags.map((tag: string, idx: number) => (
+                                  <Badge key={idx} variant="secondary" className="text-xs font-normal bg-black text-white hover:bg-zinc-800 cursor-pointer" onClick={() => copyToClipboard(tag, `tag-${clip.id}-${idx}`)}>
+                                    {tag.startsWith("#") ? tag : `#${tag}`}
+                                  </Badge>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-1.5 pt-1 border-t border-dashed">
+                            <span className="text-[11px] text-gray-400">
+                              {clip.metadata_status === "ready" ? "AI generated" : clip.metadata_status === "degraded" ? "Fallback • AI degraded" : clip.metadata_status || "pending"}
+                            </span>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 ml-auto text-xs px-2"
+                              disabled={regeneratingMetadataId === clip.id}
+                              onClick={() => handleRegenerateMetadata(clip, "tiktok")}
+                              data-testid={`regenerate-metadata-${clip.id}`}
+                            >
+                              <RefreshCw className={`w-3 h-3 ${regeneratingMetadataId === clip.id ? "animate-spin" : ""}`} />
+                              {regeneratingMetadataId === clip.id ? "Regenerating…" : "Regenerate"}
+                            </Button>
+                            <Select value="generic" onValueChange={(v) => handleRegenerateMetadata(clip, v)}>
+                              <SelectTrigger className="h-6 w-27.5 text-xs px-2">
+                                <SelectValue placeholder="Platform" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="tiktok">TikTok</SelectItem>
+                                <SelectItem value="reels">Reels</SelectItem>
+                                <SelectItem value="shorts">Shorts</SelectItem>
+                                <SelectItem value="generic">Generic</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      )}
+                      {clip.metadata_status === "pending" && !clip.description && (
+                        <div className="mb-4 p-3 rounded-lg border border-dashed bg-gray-50" data-testid={`clip-metadata-pending-${clip.id}`}>
+                          <p className="text-xs text-gray-500 flex items-center gap-2">
+                            <RefreshCw className="w-3 h-3 animate-spin" /> Generating description &amp; hashtags…
+                          </p>
                         </div>
                       )}
 

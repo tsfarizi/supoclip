@@ -16,6 +16,10 @@ const nextConfig: NextConfig = {
   experimental: {
     webpackBuildWorker: false,
   },
+  webpack: (config) => {
+    config.experiments = { ...config.experiments, asyncWebAssembly: false };
+    return config;
+  },
   async rewrites() {
     return [
       {

@@ -35,23 +35,32 @@ class ClipRepository:
         shareability_score: int = 0,
         hook_type: Optional[str] = None,
         hook_title: Optional[str] = None,
+        description: Optional[str] = None,
+        hashtags: Optional[list[str]] = None,
+        metadata_status: str = "pending",
+        metadata_version: Optional[str] = None,
+        metadata_prompt_version: Optional[str] = None,
     ) -> str:
         """Create a new clip record and return its ID."""
+        import json as _json
+
         clip_id = generate_uuid_string()
-        # B3 fallback removed: single INSERT with explicit id and hook columns,
-        # fail-loud on any DB error; commits here to mirror TaskRepository.create_task.
+        hashtags_json = _json.dumps(hashtags or [], ensure_ascii=False) if hashtags is not None else None
+        # Clamp metadata_status
+        if metadata_status not in ("pending", "ready", "degraded", "failed"):
+            metadata_status = "pending"
         result = await db.execute(
             sa_text("""
                 INSERT INTO generated_clips
                 (id, task_id, filename, file_path, start_time, end_time, duration,
                  text, relevance_score, reasoning, clip_order,
                  virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                 hook_title, created_at)
+                 hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version, created_at)
                 VALUES
                 (:clip_id, :task_id, :filename, :file_path, :start_time, :end_time, :duration,
                  :text, :relevance_score, :reasoning, :clip_order,
                  :virality_score, :hook_score, :engagement_score, :value_score, :shareability_score, :hook_type,
-                 :hook_title, NOW())
+                 :hook_title, :description, :hashtags, :metadata_status, :metadata_version, :metadata_prompt_version, NOW())
                 RETURNING id
             """),
             {
@@ -73,6 +82,11 @@ class ClipRepository:
                 "shareability_score": shareability_score,
                 "hook_type": hook_type,
                 "hook_title": hook_title,
+                "description": description,
+                "hashtags": hashtags_json,
+                "metadata_status": metadata_status,
+                "metadata_version": metadata_version,
+                "metadata_prompt_version": metadata_prompt_version,
             },
         )
         await db.commit()
@@ -85,13 +99,14 @@ class ClipRepository:
     @staticmethod
     async def get_clips_by_task(db: AsyncSession, task_id: str) -> List[Dict[str, Any]]:
         """Get all clips for a specific task, ordered by clip_order."""
-        # B3 fallback removed: single SELECT including hook_title, fail-loud on any DB error.
+        import json as _json
+
         result = await db.execute(
             sa_text("""
                 SELECT id, filename, file_path, start_time, end_time, duration,
                        text, relevance_score, reasoning, clip_order, created_at,
                        virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                       hook_title
+                       hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version
                 FROM generated_clips
                 WHERE task_id = :task_id
                 ORDER BY clip_order ASC
@@ -101,6 +116,12 @@ class ClipRepository:
 
         clips = []
         for row in result.fetchall():
+            try:
+                hashtags = _json.loads(row.hashtags) if row.hashtags else []
+                if not isinstance(hashtags, list):
+                    hashtags = []
+            except Exception:
+                hashtags = []
             clips.append(
                 {
                     "id": row.id,
@@ -122,6 +143,11 @@ class ClipRepository:
                     "shareability_score": row.shareability_score or 0,
                     "hook_type": row.hook_type,
                     "hook_title": row.hook_title,
+                    "description": row.description,
+                    "hashtags": hashtags,
+                    "metadata_status": row.metadata_status or "pending",
+                    "metadata_version": row.metadata_version,
+                    "metadata_prompt_version": row.metadata_prompt_version,
                 }
             )
 
@@ -165,14 +191,15 @@ class ClipRepository:
         db: AsyncSession, clip_id: str
     ) -> Optional[Dict[str, Any]]:
         """Get one clip by ID."""
-        # B3 fallback removed: single SELECT including hook_title, fail-loud on any DB error.
+        import json as _json
+
         result = await db.execute(
             sa_text(
                 """
                 SELECT id, task_id, filename, file_path, start_time, end_time, duration,
                        text, relevance_score, reasoning, clip_order,
                        virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                       hook_title, created_at
+                       hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version, created_at
                 FROM generated_clips
                 WHERE id = :clip_id
                 """
@@ -182,6 +209,12 @@ class ClipRepository:
         row = result.fetchone()
         if not row:
             return None
+        try:
+            hashtags = _json.loads(row.hashtags) if row.hashtags else []
+            if not isinstance(hashtags, list):
+                hashtags = []
+        except Exception:
+            hashtags = []
 
         return {
             "id": row.id,
@@ -202,6 +235,11 @@ class ClipRepository:
             "shareability_score": row.shareability_score or 0,
             "hook_type": row.hook_type,
             "hook_title": row.hook_title,
+            "description": row.description,
+            "hashtags": hashtags,
+            "metadata_status": row.metadata_status or "pending",
+            "metadata_version": row.metadata_version,
+            "metadata_prompt_version": row.metadata_prompt_version,
             "created_at": row.created_at.isoformat(),
             "video_url": f"/tasks/{row.task_id}/clips/{row.id}/file",
         }
@@ -262,3 +300,44 @@ class ClipRepository:
                 {"clip_order": idx, "clip_id": cid},
             )
         await db.commit()
+
+    @staticmethod
+    async def update_clip_metadata(
+        db: AsyncSession,
+        clip_id: str,
+        description: str,
+        hashtags: list[str],
+        metadata_status: str = "ready",
+        metadata_version: str | None = None,
+        metadata_prompt_version: str | None = None,
+    ) -> bool:
+        """Update per-clip marketing metadata (description/hashtags) with CAS on existence."""
+        import json as _json
+
+        hashtags_json = _json.dumps(hashtags or [], ensure_ascii=False)
+        if metadata_status not in ("pending", "ready", "degraded", "failed"):
+            metadata_status = "ready"
+        result = await db.execute(
+            sa_text(
+                """
+                UPDATE generated_clips
+                SET description = :description,
+                    hashtags = :hashtags,
+                    metadata_status = :metadata_status,
+                    metadata_version = :metadata_version,
+                    metadata_prompt_version = :metadata_prompt_version,
+                    updated_at = NOW()
+                WHERE id = :clip_id
+                """
+            ),
+            {
+                "clip_id": clip_id,
+                "description": description,
+                "hashtags": hashtags_json,
+                "metadata_status": metadata_status,
+                "metadata_version": metadata_version,
+                "metadata_prompt_version": metadata_prompt_version,
+            },
+        )
+        await db.commit()
+        return bool(result.rowcount)

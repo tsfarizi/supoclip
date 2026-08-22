@@ -22,6 +22,11 @@ export interface Clip {
   shareability_score?: number;
   hook_type?: string | null;
   hook_title?: string | null;
+  description?: string | null;
+  hashtags?: string[] | null;
+  metadata_status?: string | null;
+  metadata_version?: string | null;
+  metadata_prompt_version?: string | null;
 }
 
 // Existing merge endpoint contract. Hook metadata is returned by the backend;
