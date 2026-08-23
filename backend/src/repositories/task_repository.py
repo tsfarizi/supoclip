@@ -468,6 +468,32 @@ class TaskRepository:
         ]
 
     @staticmethod
+    async def get_processing_tasks(db: AsyncSession) -> List[Dict[str, Any]]:
+        """All tasks stuck in processing, with timestamps for staleness checks.
+
+        Used by the worker recovery sweep to mark processing tasks whose worker
+        died mid-job (no heartbeat update within the window) as error, so they
+        never spin forever in the UI.
+        """
+        result = await db.execute(
+            text("""
+                SELECT t.id, t.status, t.created_at, t.updated_at
+                FROM tasks t
+                WHERE t.status = 'processing'
+                ORDER BY t.created_at ASC
+            """)
+        )
+        return [
+            {
+                "id": row.id,
+                "status": row.status,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+            for row in result.fetchall()
+        ]
+
+    @staticmethod
     async def enable_sharing(
         db: AsyncSession, task_id: str, share_token: str
     ) -> Optional[str]:

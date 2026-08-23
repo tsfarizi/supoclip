@@ -4,15 +4,44 @@ Worker tasks - background jobs processed by arq workers.
 
 import logging
 from typing import Dict, Any, Optional
+from datetime import datetime
 import json
 
 from arq import cron
 
+from ..media_tools import ensure_media_tools_on_path
 from ..observability import configure_logging, set_trace_id
+
+# The worker execs ffmpeg/ffprobe by name throughout the pipeline; make sure
+# they resolve even when this process was not started through run.ps1.
+ensure_media_tools_on_path()
 
 configure_logging()
 
 logger = logging.getLogger(__name__)
+
+# A live worker checkpoints task progress at every stage; the longest legal
+# pipeline (job_timeout) is 3h. Anything untouched well past that is orphaned.
+PROCESSING_STALE_AFTER_SECONDS = 4 * 60 * 60
+PROCESSING_STALE_MESSAGE = (
+    "Processing stopped unexpectedly (worker restart or crash). "
+    "Resume the task to try again."
+)
+
+
+def _is_stale_processing_task(task: Dict[str, Any]) -> bool:
+    """Detect processing tasks whose worker died without a terminal write."""
+    if task.get("status") != "processing":
+        return False
+    updated_at = task.get("updated_at")
+    if not updated_at:
+        return False
+    now = (
+        datetime.now(updated_at.tzinfo)
+        if getattr(updated_at, "tzinfo", None)
+        else datetime.utcnow()
+    )
+    return (now - updated_at).total_seconds() >= PROCESSING_STALE_AFTER_SECONDS
 
 
 async def sweep_stale_queued_tasks(ctx: Dict[str, Any]) -> int:
@@ -21,6 +50,10 @@ async def sweep_stale_queued_tasks(ctx: Dict[str, Any]) -> int:
     GET /tasks/{id} must stay read-only, so the stale-queued transition lives
     here instead of on the read path. Runs on a cron schedule; each task row
     is committed individually via update_task_status.
+
+    Also sweeps stale *processing* tasks: rows whose last update is older than
+    PROCESSING_STALE_AFTER_SECONDS were owned by a worker that died mid-job
+    (crash, restart, power loss) and would otherwise spin forever in the UI.
     """
     from ..database import AsyncSessionLocal
     from ..runtime_settings import load_runtime_settings_cache
@@ -31,6 +64,7 @@ async def sweep_stale_queued_tasks(ctx: Dict[str, Any]) -> int:
         await load_runtime_settings_cache(db)
         task_service = TaskService(db)
         stale_count = 0
+
         for task in await TaskRepository.get_queued_tasks(db):
             if task_service._is_stale_queued_task(task):
                 updated = await task_service.task_repo.update_task_status(
@@ -48,8 +82,28 @@ async def sweep_stale_queued_tasks(ctx: Dict[str, Any]) -> int:
                         "Sweep CAS rejected for task %s: no longer queued; skipping",
                         task["id"],
                     )
+
+        for task in await TaskRepository.get_processing_tasks(db):
+            if _is_stale_processing_task(task):
+                updated = await task_service.task_repo.update_task_status(
+                    db,
+                    task["id"],
+                    "error",
+                    expected_statuses=["processing"],
+                    progress=0,
+                    progress_message=PROCESSING_STALE_MESSAGE,
+                )
+                if updated:
+                    stale_count += 1
+                else:
+                    logger.warning(
+                        "Sweep CAS rejected for stale processing task %s: "
+                        "status changed concurrently; skipping",
+                        task["id"],
+                    )
+
         if stale_count:
-            logger.warning("Marked %d stale queued task(s) as error", stale_count)
+            logger.warning("Marked %d stale task(s) as error", stale_count)
         return stale_count
 
 

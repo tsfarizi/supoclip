@@ -123,22 +123,29 @@ def _prepare_audio_for_transcription(video_path: Path) -> Path:
     if audio_path.exists() and audio_path.stat().st_size > 0:
         return audio_path
 
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-b:a",
-        "64k",
-        str(audio_path),
-    ]
+    def extract(bitrate: str) -> subprocess.CompletedProcess:
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            bitrate,
+            str(audio_path),
+        ]
+        return run_ffmpeg_command(command, timeout=900)
+
     try:
-        result = run_ffmpeg_command(command, timeout=900)
+        result = extract("64k")
+        if result.returncode != 0 or not audio_path.exists() or audio_path.stat().st_size == 0:
+            # Second attempt at half the bitrate: long videos must still fit
+            # under upload limits instead of degrading to the raw video file.
+            result = extract("32k")
     except FileNotFoundError:
         logger.warning(
             "ffmpeg is not available; falling back to source video for transcription"
@@ -321,16 +328,34 @@ def _asr_error_detail(response: httpx.Response) -> str:
     return response.text[:200] or f"HTTP {response.status_code}"
 
 
-def get_video_transcript_local(video_path: Path, speech_model: str = "universal") -> str:
-    """Get transcript from the local ASR service with word-level timing."""
-    runtime_config = get_config()
-    base_url = runtime_config.asr_base_url
-    timeout = runtime_config.assembly_ai_http_timeout_seconds
+# Stay under the ASR service's MAX_AUDIO_MB=64 cap with headroom for the
+# multipart envelope. Audio above this is split into time chunks and merged.
+LOCAL_ASR_MAX_BYTES = 60 * 1024 * 1024
 
-    logger.info(f"Getting transcript from local ASR: {video_path}")
-    audio_path = _prepare_audio_for_transcription(video_path)
 
-    payload = None
+def _wait_for_local_asr_ready(base_url: str, timeout_seconds: int = 30) -> bool:
+    """Poll the ASR health endpoint until it answers or the deadline passes.
+
+    Covers the restart window where the port is briefly closed (WinError
+    10061); a genuinely down service still fails fast after the deadline.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            with httpx.Client(timeout=3) as client:
+                response = client.get(f"{base_url}/health")
+            if response.status_code < 400:
+                return True
+        except httpx.TransportError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2)
+
+
+def _post_audio_to_local_asr(base_url: str, audio_path: Path, timeout: int) -> Dict[str, Any]:
+    """POST one audio file to the local ASR service with bounded retries."""
+    last_error: Optional[Exception] = None
     with open(audio_path, "rb") as audio_file:
         for attempt in range(1, 4):
             # Re-uploads re-read from the start; a failed attempt may leave the offset mid-file.
@@ -352,22 +377,116 @@ def get_video_transcript_local(video_path: Path, speech_model: str = "universal"
                         response.status_code,
                         attempt,
                     )
+                    last_error = RuntimeError(
+                        f"Local ASR transcription failed (status {response.status_code}): "
+                        f"{_asr_error_detail(response)}"
+                    )
                     if attempt == 3:
-                        raise RuntimeError(
-                            f"Local ASR transcription failed (status {response.status_code}): "
-                            f"{_asr_error_detail(response)}"
-                        )
+                        raise last_error
                     time.sleep(2 if attempt == 1 else 5)
                     continue
-                payload = response.json()
-                break
+                return response.json()
             except httpx.TransportError as e:
                 logger.warning(
                     "Local ASR request failed on attempt %s/3: %s", attempt, e
                 )
+                last_error = e
                 if attempt == 3:
-                    raise RuntimeError(f"Local ASR transcription failed: {e}") from e
+                    break
                 time.sleep(2 if attempt == 1 else 5)
+    raise RuntimeError(f"Local ASR transcription failed: {last_error}")
+
+
+def _split_audio_chunks(audio_path: Path, chunk_dir: Path) -> List[Path]:
+    """Split an audio file into equal-duration MP3 chunks under the size cap.
+
+    Uses the segment muxer with `-c copy`: MP3 frames are independent, so the
+    split is fast and lossless. Chunk count derives from actual bytes so every
+    piece lands safely below LOCAL_ASR_MAX_BYTES.
+    """
+    duration = ffprobe_duration(audio_path)
+    size_bytes = audio_path.stat().st_size
+    chunk_count = max(2, math.ceil(size_bytes / LOCAL_ASR_MAX_BYTES))
+    segment_time = max(30.0, math.floor(duration / chunk_count))
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    pattern = chunk_dir / "chunk_%04d.mp3"
+    command = [
+        "ffmpeg", "-y", "-i", str(audio_path),
+        "-f", "segment", "-segment_time", str(segment_time),
+        "-c", "copy", str(pattern),
+    ]
+    result = run_ffmpeg_command(command, timeout=900)
+    chunks = sorted(chunk_dir.glob("chunk_*.mp4")) + sorted(chunk_dir.glob("chunk_*.mp3"))
+    if result.returncode != 0 or not chunks:
+        raise RuntimeError(
+            f"Failed to split transcription audio into chunks (exit {result.returncode})"
+        )
+    logger.info(
+        "Split transcription audio (%.1f MB) into %d chunks of ~%.0fs",
+        size_bytes / (1024 * 1024), len(chunks), segment_time,
+    )
+    return chunks
+
+
+def _transcribe_audio_chunked(audio_path: Path, base_url: str, timeout: int) -> Dict[str, Any]:
+    """Transcribe an oversized audio file chunk-by-chunk and merge the results.
+
+    Each chunk is posted separately (all well under the service cap), then word
+    timestamps are offset by each chunk's start time and concatenated in order.
+    A single failed chunk fails the whole transcript: partial transcripts would
+    desync subtitles and clip boundaries downstream.
+    """
+    work_dir = Path(tempfile.mkdtemp(prefix="supoclip_asr_chunks_"))
+    try:
+        chunks = _split_audio_chunks(audio_path, work_dir)
+        duration = ffprobe_duration(audio_path)
+        chunk_duration = duration / len(chunks)
+
+        merged_words: List[Dict[str, Any]] = []
+        merged_texts: List[str] = []
+        for index, chunk in enumerate(chunks):
+            offset_ms = int(round(index * chunk_duration * 1000))
+            payload = _post_audio_to_local_asr(base_url, chunk, timeout)
+            merged_texts.append((payload.get("text") or "").strip())
+            for word in payload.get("words", []) or []:
+                merged_words.append(
+                    {
+                        "text": word["text"],
+                        "start_ms": int(word["start_ms"]) + offset_ms,
+                        "end_ms": int(word["end_ms"]) + offset_ms,
+                    }
+                )
+        logger.info(
+            "Merged chunked transcript: %d words from %d chunks",
+            len(merged_words), len(chunks),
+        )
+        return {"text": " ".join(t for t in merged_texts if t), "words": merged_words}
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def get_video_transcript_local(video_path: Path, speech_model: str = "universal") -> str:
+    """Get transcript from the local ASR service with word-level timing."""
+    runtime_config = get_config()
+    base_url = runtime_config.asr_base_url
+    timeout = runtime_config.assembly_ai_http_timeout_seconds
+
+    logger.info(f"Getting transcript from local ASR: {video_path}")
+    audio_path = _prepare_audio_for_transcription(video_path)
+
+    # Preflight: the ASR service may be mid-restart; wait briefly instead of
+    # failing the whole task with "connection refused" on the first attempt.
+    if not _wait_for_local_asr_ready(base_url, timeout_seconds=30):
+        raise RuntimeError(
+            f"Local ASR service is not reachable at {base_url} "
+            "(start it with run.ps1 -IncludeAsr)"
+        )
+
+    audio_size = audio_path.stat().st_size if audio_path.is_file() else 0
+    if audio_size > LOCAL_ASR_MAX_BYTES:
+        payload = _transcribe_audio_chunked(audio_path, base_url, timeout)
+    else:
+        payload = _post_audio_to_local_asr(base_url, audio_path, timeout)
 
     words = [
         WordShim(text=w["text"], start=int(w["start_ms"]), end=int(w["end_ms"]))

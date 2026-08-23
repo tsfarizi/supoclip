@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import Config, get_config, set_config_override
 from .database import AsyncSessionLocal, close_db, configure_database, get_db, init_db
+from .media_tools import ensure_media_tools_on_path
 from .runtime_settings import (
     SettingsInvalidationSubscriber,
     load_runtime_settings_cache,
@@ -36,6 +37,10 @@ from .observability import (
     get_trace_id,
     set_trace_id,
 )
+
+# Media routes and the clip editor exec ffmpeg/ffprobe by name; resolve them
+# even when this process was not started through run.ps1.
+ensure_media_tools_on_path()
 
 configure_logging()
 
