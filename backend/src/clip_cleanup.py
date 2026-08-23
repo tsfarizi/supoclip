@@ -158,6 +158,13 @@ async def reconcile_orphaned_clip_files(
             _remove_clip_and_sidecars(candidate)
             removed += 1
         except OSError as exc:
+            # Windows WinError 32: file is still being served/streamed (frontend
+            # preview holds an open handle). Treat as transient — skip without
+            # counting as a permanent failure so the hourly cron doesn't spam.
+            err_no = getattr(exc, "winerror", None)
+            if err_no == 32 or "being used by another process" in str(exc):
+                logger.info("Skipping locked orphan clip %s (in use)", candidate)
+                continue
             failed += 1
             logger.warning("Failed to remove orphan clip %s: %s", candidate, exc)
     return {

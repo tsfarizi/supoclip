@@ -331,6 +331,15 @@ def _asr_error_detail(response: httpx.Response) -> str:
 # Stay under the ASR service's MAX_AUDIO_MB=64 cap with headroom for the
 # multipart envelope. Audio above this is split into time chunks and merged.
 LOCAL_ASR_MAX_BYTES = 60 * 1024 * 1024
+# Long videos (75 min = 4530s) take ~1100s to transcribe on Qwen3-ASR and
+# would time out a single 900s client request. Split by duration as well so
+# each chunk stays within the per-request deadline.
+LOCAL_ASR_MAX_DURATION_SECONDS = 1800.0
+# Per-chunk inference roughly scales with audio length: ~0.25-0.3x realtime on
+# current GPU plus aligner overhead. Add a fixed headroom for model warm-up.
+ASR_TIMEOUT_SECONDS_PER_AUDIO_SECOND = 0.45
+ASR_TIMEOUT_MIN_SECONDS = 600
+ASR_TIMEOUT_HEADROOM_SECONDS = 300
 
 
 def _wait_for_local_asr_ready(base_url: str, timeout_seconds: int = 30) -> bool:
@@ -353,15 +362,35 @@ def _wait_for_local_asr_ready(base_url: str, timeout_seconds: int = 30) -> bool:
         time.sleep(2)
 
 
+def _estimate_asr_timeout(audio_path: Path, base_timeout: int) -> int:
+    """Scale the client timeout with audio duration so long media never hit a fixed 900s wall.
+
+    Qwen3-ASR on a 75-min podcast needs ~1100s end-to-end. A static 900s timeout
+    guarantees failure for the longest allowed videos (MAX_VIDEO_DURATION=7200).
+    """
+    try:
+        duration = ffprobe_duration(audio_path)
+    except Exception:
+        return max(int(base_timeout), ASR_TIMEOUT_MIN_SECONDS)
+    estimated = int(duration * ASR_TIMEOUT_SECONDS_PER_AUDIO_SECOND + ASR_TIMEOUT_HEADROOM_SECONDS)
+    # Never shrink below the configured floor; never below per-file minimum.
+    return max(int(base_timeout), ASR_TIMEOUT_MIN_SECONDS, estimated)
+
+
 def _post_audio_to_local_asr(base_url: str, audio_path: Path, timeout: int) -> Dict[str, Any]:
     """POST one audio file to the local ASR service with bounded retries."""
+    # httpx's single-value timeout applies to every phase (connect/read/write/pool).
+    # For multi-minute inference the read phase dominates; use an explicit
+    # Timeout object so connect stays short but read inherits the scaled value.
+    effective_timeout = _estimate_asr_timeout(audio_path, timeout)
+    httpx_timeout = httpx.Timeout(effective_timeout, connect=10.0)
     last_error: Optional[Exception] = None
     with open(audio_path, "rb") as audio_file:
         for attempt in range(1, 4):
             # Re-uploads re-read from the start; a failed attempt may leave the offset mid-file.
             audio_file.seek(0)
             try:
-                with httpx.Client(timeout=timeout) as client:
+                with httpx.Client(timeout=httpx_timeout) as client:
                     response = client.post(
                         f"{base_url}/v1/transcribe",
                         files={"audio": (audio_path.name, audio_file, "audio/mpeg")},
@@ -406,7 +435,13 @@ def _split_audio_chunks(audio_path: Path, chunk_dir: Path) -> List[Path]:
     """
     duration = ffprobe_duration(audio_path)
     size_bytes = audio_path.stat().st_size
-    chunk_count = max(2, math.ceil(size_bytes / LOCAL_ASR_MAX_BYTES))
+    # Chunk by both bytes (service limit) and duration (timeout / VRAM).
+    bytes_chunks = max(1, math.ceil(size_bytes / LOCAL_ASR_MAX_BYTES))
+    duration_chunks = max(1, math.ceil(duration / LOCAL_ASR_MAX_DURATION_SECONDS))
+    chunk_count = max(bytes_chunks, duration_chunks)
+    # Caller guarantees at least one limit is exceeded, but clamp to >=2 for
+    # the segment muxer when rounding pushes ceil to 1.
+    chunk_count = max(2, chunk_count)
     segment_time = max(30.0, math.floor(duration / chunk_count))
     chunk_dir.mkdir(parents=True, exist_ok=True)
     pattern = chunk_dir / "chunk_%04d.mp3"
@@ -469,7 +504,9 @@ def get_video_transcript_local(video_path: Path, speech_model: str = "universal"
     """Get transcript from the local ASR service with word-level timing."""
     runtime_config = get_config()
     base_url = runtime_config.asr_base_url
-    timeout = runtime_config.assembly_ai_http_timeout_seconds
+    timeout = getattr(
+        runtime_config, "asr_request_timeout_seconds", runtime_config.assembly_ai_http_timeout_seconds
+    )
 
     logger.info(f"Getting transcript from local ASR: {video_path}")
     audio_path = _prepare_audio_for_transcription(video_path)
@@ -483,7 +520,12 @@ def get_video_transcript_local(video_path: Path, speech_model: str = "universal"
         )
 
     audio_size = audio_path.stat().st_size if audio_path.is_file() else 0
-    if audio_size > LOCAL_ASR_MAX_BYTES:
+    try:
+        audio_duration = ffprobe_duration(audio_path) if audio_path.is_file() else 0.0
+    except Exception:
+        audio_duration = 0.0
+    needs_chunking = audio_size > LOCAL_ASR_MAX_BYTES or audio_duration > LOCAL_ASR_MAX_DURATION_SECONDS
+    if needs_chunking:
         payload = _transcribe_audio_chunked(audio_path, base_url, timeout)
     else:
         payload = _post_audio_to_local_asr(base_url, audio_path, timeout)
