@@ -9,8 +9,8 @@ The launcher writes one log pair per process under `.local\logs\`:
 | Process | Command in `run.ps1` | Logs | Port |
 |---|---|---|---|
 | Worker (arq) | `python -m arq src.workers.tasks.WorkerSettings` | `.local\logs\worker.out.log`, `worker.err.log` | — |
-| Backend (FastAPI) | `python -m uvicorn src.main_refactored:app --host 127.0.0.1 --port 8000` | `.local\logs\backend.out.log`, `backend.err.log` | 8000 |
-| Frontend (Next.js production) | `pnpm exec next start --port 3107` | `.local\logs\frontend.out.log`, `frontend.err.log` | 3107 |
+| Backend (FastAPI) | `python -m uvicorn src.app:app --host 127.0.0.1 --port 8000` (shim `src.main_refactored:app` compat) | `.local\logs\backend.out.log`, `backend.err.log` | 8000 |
+| Frontend (Next.js production) | `bun run start --port 3107` | `.local\logs\frontend.out.log`, `frontend.err.log` | 3107 |
 | MCP (optional, `-IncludeMcp`) | `supoclip-mcp` | `.local\logs\mcp.*.log` | 9100 |
 | ASR (optional, native) | `python -m uvicorn src.main:app --port 8765` | `.local\logs\asr.*.log` | 8765 |
 

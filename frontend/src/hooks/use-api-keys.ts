@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { buildSupportError } from "@/lib/api-client";
+
 export interface ApiKey {
   id: string;
   name: string;
@@ -29,7 +31,7 @@ export function useApiKeys(): {
     try {
       const response = await fetch("/api/api-keys", { cache: "no-store" });
       if (!response.ok) {
-        throw new Error(`Failed to load API keys (${response.status})`);
+        throw new Error(await buildSupportError(response, `Failed to load API keys (${response.status})`));
       }
       const data = (await response.json()) as { api_keys?: ApiKey[] };
       setKeys(data.api_keys ?? []);
@@ -58,8 +60,7 @@ export function useApiKeys(): {
           message?: string;
         };
         if (!response.ok) {
-          const message =
-            data.detail || data.message || "Failed to create API key";
+          const message = await buildSupportError(response, data.detail || data.message || "Failed to create API key");
           setError(message);
           return { error: message };
         }
@@ -86,11 +87,8 @@ export function useApiKeys(): {
           method: "DELETE",
         });
         if (!response.ok) {
-          const data = (await response.json().catch(() => ({}))) as {
-            detail?: string;
-            message?: string;
-          };
-          setError(data.detail || data.message || "Failed to revoke API key");
+          const message = await buildSupportError(response, "Failed to revoke API key");
+          setError(message);
           return false;
         }
         await loadKeys();

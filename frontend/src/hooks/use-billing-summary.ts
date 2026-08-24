@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { buildSupportError } from "@/lib/api-client";
 import { BillingSummary } from "@/lib/task-types";
 
 export function useBillingSummary(): {
@@ -19,7 +20,7 @@ export function useBillingSummary(): {
         cache: "no-store",
       });
       if (!response.ok) {
-        throw new Error(`Failed to load billing summary (${response.status})`);
+        throw new Error(await buildSupportError(response, `Failed to load billing summary (${response.status})`));
       }
       setSummary((await response.json()) as BillingSummary);
     } catch (err) {

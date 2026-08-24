@@ -8,7 +8,7 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$SkipDeps,      # skip dependency install steps (uv sync / pnpm install)
+    [switch]$SkipDeps,      # skip dependency install steps (uv sync / bun install)
     [switch]$SkipBuild,     # skip frontend production build (start existing .next)
     [switch]$Rebuild,       # force frontend production rebuild
     [switch]$SkipWorker,
@@ -49,7 +49,7 @@ if (Test-Path (Join-Path $protoBin 'proto.exe')) {
     exit 1
 }
 if (-not $SkipDeps) {
-    Write-Step "Ensuring pinned toolchain (node/pnpm/python/deno/uv from .prototools)"
+    Write-Step "Ensuring pinned toolchain (node/bun/python/uv from .prototools)"
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { & proto install 2>&1 | Out-Null } finally { $ErrorActionPreference = $prevEap }
@@ -198,11 +198,11 @@ if (-not $SkipDeps) {
         try { & uv sync 2>&1 | Select-Object -Last 3 } finally { $ErrorActionPreference = $prevEap; Pop-Location }
     } else { Write-Ok "backend/.venv exists" }
     if (-not (Test-Path (Join-Path $repo 'frontend\node_modules'))) {
-        Write-Step "pnpm install + prisma generate (frontend)"
+        Write-Step "bun install + prisma generate (frontend)"
         Push-Location (Join-Path $repo 'frontend')
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        try { & pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 3; & pnpm exec prisma generate 2>&1 | Out-Null } finally { $ErrorActionPreference = $prevEap; Pop-Location }
+        try { & bun install --frozen-lockfile 2>&1 | Select-Object -Last 3; & bunx prisma generate 2>&1 | Out-Null } finally { $ErrorActionPreference = $prevEap; Pop-Location }
     } else { Write-Ok "frontend/node_modules exists" }
     if ($IncludeMcp -and -not (Test-Path (Join-Path $repo 'mcp\.venv\Scripts\supoclip-mcp.exe'))) {
         Write-Step "uv sync (mcp)"
@@ -263,7 +263,7 @@ if (-not $SkipFrontend -and -not (Port-Listening 3107)) {
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
-            $buildOut = & pnpm build 2>&1
+            $buildOut = & bun run build 2>&1
             $buildExit = $LASTEXITCODE
             $buildOut | Select-Object -Last 15
             if ($buildExit -ne 0) { throw "next build failed (exit $buildExit)" }
@@ -278,7 +278,7 @@ if (-not $SkipFrontend -and -not (Port-Listening 3107)) {
         Write-Ok "frontend production build present (use -Rebuild to force a rebuild)"
     }
 
-    Start-Bg 'frontend' 'cmd.exe' @('/c','pnpm exec next start --port 3107') (Join-Path $repo 'frontend')
+    Start-Bg 'frontend' 'cmd.exe' @('/c','bun run start --port 3107') (Join-Path $repo 'frontend')
     $env:DATABASE_URL = $savedDbUrl
 } elseif (-not (Port-Listening 3107)) { Write-Ok "frontend skipped (-SkipFrontend)" }
 else { Write-Ok "frontend already listening on 3107" }

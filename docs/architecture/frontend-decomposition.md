@@ -1,7 +1,9 @@
 ﻿# Frontend Decomposition — A14b Structural Refactor
 
-Status: DESAIN (read-only). Unit eksekusi: A14b. Baseline perilaku: T9 (browser regression hijau).
+Status: DESAIN (read-only) — sinkron as-built U9. Unit eksekusi: A14b. Baseline perilaku: T9 (browser regression hijau).
 Dokumen ini adalah kontrak struktural: hooks, komponen, kontrak props/state, urutan refactor, dan kriteria penerimaan. Tidak berisi implementasi.
+
+> **Sinkron U9 (2026-08-24):** Boundary baru `server/db.ts` (`server-only` singleton Prisma) + `lib/api-client.ts` (`fetchJson`/`apiFetch` → `lib/api-error.ts`) adalah kanonik post-U4/U8; `lib/prisma.ts` hapus, `lib/backend-auth.ts` → `server/backend-auth.ts`. Toolchain `bun` (`bun.lock` text, `bun run lint`/`bunx tsc --noEmit`/`bunx playwright`); entry backend kanonik `src.app:app` (shim `src.main_refactored:app` compat). Detail penuh: `CONVENTIONS.md` §3–§4 & `TARGET_ARCHITECTURE.md` §3–§4.
 
 ---
 
@@ -654,7 +656,7 @@ Header edit page tetap di page (kecil: back, judul, ExportBar di dalam header).
 
 ## 4. Urutan Refactor (langkah aman, preservasi perilaku)
 
-Prinsip tiap langkah: (1) buat unit baru, (2) ganti satu surface, (3) jalankan verifikasi penuh, (4) lanjut. Tidak ada langkah yang mengubah lebih dari satu surface sekaligus. Setelah tiap langkah: pnpm run lint + smoke test manual surface yang disentuh. T10 browser regression dijalankan penuh setelah langkah yang menyentuh detail/home/list/settings.
+Prinsip tiap langkah: (1) buat unit baru, (2) ganti satu surface, (3) jalankan verifikasi penuh, (4) lanjut. Tidak ada langkah yang mengubah lebih dari satu surface sekaligus. Setelah tiap langkah: bun run lint + smoke test manual surface yang disentuh. T10 browser regression dijalankan penuh setelah langkah yang menyentuh detail/home/list/settings.
 
 ### Langkah 1 — Tipe bersama + util murni (nol JSX, nol fetch)
 - Buat lib/task-types.ts: semua interface + getClipUrl, formatDuration, clamp, skor warna, getHookTypeLabel, ACTIVE_TASK_STATUSES, MIN_GAP_SECONDS, DEFAULT_VIDEO_FX, EXPORT_DIMENSIONS.
@@ -718,12 +720,12 @@ Ambang ukuran (setelah A14b):
 - Hooks < 150 baris per file (kecuali useTaskQuery/useTaskPolling bila logika SSE memerlukan; tetap < 250).
 
 Verifikasi wajib (semua hijau):
-1. Unit test frontend dihapus (Vitest); verifikasi via `pnpm run lint` + `cd e2e && pnpm exec playwright test`.
-2. pnpm run lint — nol error, nol warning baru.
-3. cd e2e && pnpm exec playwright test (T10 browser regression) — seluruh spek e2e hijau: home auth, task detail (seeded clip visible), list, settings save, admin gate.
+1. Unit test frontend dihapus (Vitest); verifikasi via `bun run lint` + `cd e2e && bunx playwright test`.
+2. bun run lint — nol error, nol warning baru.
+3. cd e2e && bunx playwright test (T10 browser regression) — seluruh spek e2e hijau: home auth, task detail (seeded clip visible), list, settings save, admin gate.
 4. TIDAK ada perubahan perilaku baseline: URL route tidak berubah, kontrak API tidak berubah (body/endpoint sama), teks UI tidak berubah, alur user tidak berubah (kecuali refactor murni internal).
 5. Tidak ada kode mati: pindahkan (bukan salin) logika; verifikasi dengan grep bahwa handler lama tidak tersisa.
-6. Bundel build: pnpm run build sukses (TS strict + Next build) — menjamin tidak ada import yang hilang.
+6. Bundel build: bun run build sukses (TS strict + Next build via `bunx tsc --noEmit`) — menjamin tidak ada import yang hilang.
 
 Definisi selesai per langkah: unit baru ada + test hijau + surface yang disentuh di-refactor + verifikasi 1-6 lulus.
 

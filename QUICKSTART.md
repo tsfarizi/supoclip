@@ -21,7 +21,7 @@ Run SupoClip natively on Windows with a single command. No Docker, no containers
 ```
 
 That's it! The script will:
-- Install the pinned toolchain (node/pnpm/python/deno/uv) via proto
+- Install the pinned toolchain (node/bun/python/uv) via proto
 - Start Redis and ffmpeg from portable user-scope installs when missing
 - Bootstrap the `supoclip` role, database, and schema on PostgreSQL
 - Install Python and frontend dependencies
@@ -79,13 +79,13 @@ proto install
 # Backend API + worker (two terminals)
 cd backend
 uv sync
-uv run uvicorn src.main_refactored:app --host 0.0.0.0 --port 8000   # terminal 1
-uv run arq src.workers.tasks.WorkerSettings                          # terminal 2
+uv run uvicorn src.app:app --host 0.0.0.0 --port 8000                 # terminal 1 (shim src.main_refactored:app compat)
+uv run arq src.workers.tasks.WorkerSettings                          # terminal 2 (shim src.worker.WorkerSettings compat)
 
 # Frontend
 cd frontend
-pnpm install
-pnpm run dev
+bun install
+bun run dev
 
 # MCP server (optional)
 cd mcp

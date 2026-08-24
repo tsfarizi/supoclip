@@ -28,7 +28,7 @@ import {
   SheetFooter,
 } from "@/components/ui/sheet";
 import { useSession } from "@/lib/auth-client";
-import { formatSupportMessage, parseApiError } from "@/lib/api-error";
+import { buildSupportError } from "@/lib/api-client";
 import { buildClipDownloadFilename } from "@/lib/clip-download";
 import { buildFontOptionsPayload, FONT_SIZE_OPTIONS, FONT_TEMPLATE_DEFAULT_VALUE } from "@/lib/font-options";
 import {
@@ -170,11 +170,6 @@ export default function TaskPage() {
   const getClipUrl = (videoUrl: string) =>
     videoUrl.startsWith("/api/") ? videoUrl : `/api${videoUrl}`;
 
-  const buildSupportError = useCallback(async (response: Response, fallbackMessage: string) => {
-    const parsed = await parseApiError(response, fallbackMessage);
-    return formatSupportMessage(parsed);
-  }, []);
-
   const triggerAutoRefresh = useCallback(() => {
     if (hasTriggeredAutoRefresh.current) return;
     hasTriggeredAutoRefresh.current = true;
@@ -258,7 +253,7 @@ export default function TaskPage() {
         return false;
       }
     },
-    [buildSupportError, params.id, taskApiUrl],
+    [params.id, taskApiUrl],
   );
 
   // Initial fetch - runs immediately, doesn't wait for session

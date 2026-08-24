@@ -2,6 +2,7 @@
   "name": "supoclip-e2e",
   "version": "1.0.0",
   "private": true,
+  "packageManager": "bun@1.2.18",
   "description": "E2E Playwright suite for SupoClip against the native stack (run.ps1)",
   "scripts": {
     "test": "playwright test",

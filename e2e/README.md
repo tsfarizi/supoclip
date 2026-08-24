@@ -12,12 +12,12 @@ Suite E2E Playwright untuk memverifikasi fungsionalitas SupoClip terhadap
    - Redis: `:6379`
    - Jalankan: `.\run.ps1` dari root repo (sekali). Jangan menyalakan stack
      melalui suite ini.
-2. Node/pnpm dari toolchain proto (lihat `.prototools`): `proto install`.
+2. Node/bun dari toolchain proto (lihat `.prototools`): `proto install`.
 3. Browser Playwright terpasang. Folder `e2e/` memakai `@playwright/test
    ~1.55.0` (versi sama dengan frontend) sehingga browser yang sudah ada di
    `%LOCALAPPDATA%\ms-playwright` ter-reuse. Bila terjadi mismatch browser:
    ```
-   pnpm exec playwright install chromium
+   bunx playwright install chromium
    ```
 
 ## Menjalankan
@@ -25,11 +25,11 @@ Suite E2E Playwright untuk memverifikasi fungsionalitas SupoClip terhadap
 Dari folder `e2e/`:
 
 ```
-pnpm install
-pnpm exec playwright test          # semua spec, headless
-pnpm exec playwright test --headed # tampilkan browser
-pnpm exec playwright test --reporter=list --project=chromium specs/tasks.spec.ts
-pnpm run test:report               # buka HTML report (hasil run terakhir)
+bun install
+bunx playwright test          # semua spec, headless
+bunx playwright test --headed # tampilkan browser
+bunx playwright test --reporter=list --project=chromium specs/tasks.spec.ts
+bun run test:report               # buka HTML report (hasil run terakhir)
 ```
 
 `global-setup.ts` berjalan otomatis sebelum suite dan:
@@ -112,5 +112,5 @@ e2e/
    reason (lihat `tasks.spec.ts`).
 4. Jangan menyalakan stack dan jangan menyentuh backend langsung tanpa
    signature HMAC (backend menolak request tanpa header `x-supoclip-*`).
-5. Jalankan `pnpm exec playwright test specs/<area>.spec.ts` dan pastikan
+5. Jalankan `bunx playwright test specs/<area>.spec.ts` dan pastikan
    deterministik (lolos berulang kali dalam urutan apa pun).

@@ -56,11 +56,13 @@ SupoClip is an open-source AI video clipping application. It takes long-form vid
 
 The current repository snapshot includes:
 
-- `frontend/`: the main Next.js application
-- `backend/`: the FastAPI API and ARQ worker code
-- Root-level infrastructure files such as `.prototools`, `init.sql`, `.env.example`, `run.ps1`, and `stop.ps1`
+- `frontend/`: the main Next.js application (`src/server/db.ts` singleton Prisma, `src/lib/api-client.ts` `fetchJson`/`apiFetch`, `src/hooks/`, `src/components/features/`)
+- `backend/`: the FastAPI API (`src/app.py` kanonik, shim `src/main_refactored.py` compat) and ARQ worker code
+- Root-level infrastructure files such as `.prototools` (`node 22.23.2`/`bun 1.2.18`/`python 3.12.5`/`uv 0.9.7` tanpa deno, lock `frontend/bun.lock` text), `init.sql`, `.env.example`, `run.ps1` (kanonik 343L behavior-preserving), and `stop.ps1`
 
-Repository guidance still mentions a separate `waitlist/` app, but that directory is not present in this checkout. The documentation in this folder reflects the repository as it exists now.
+Boundary kanonik diringkas di [`CONVENTIONS.md`](../CONVENTIONS.md) dan `docs/architecture/TARGET_ARCHITECTURE.md` (gate V2) — termasuk matriks impor backend, `server/` vs `lib/` vs `hooks/`, dan pytest narrow-scope `auth+billing ≥65%` (ekspansi `--cov=src` ditunda).
+
+Repository guidance still mentions a separate `waitlist/` app, but that directory is not present in this checkout. The documentation in this folder reflects the repository as it exists now (as-built U9, post-remediasi U8).
 
 ## Recommended Reading Paths
 

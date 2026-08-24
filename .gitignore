@@ -23,6 +23,8 @@ asr/models/
 backend/data/
 # dependencies (any nested node_modules, e.g. frontend/packages/*, monorepo sub-apps)
 node_modules/
+# stale renamed dependency dirs (e.g. backups of old installs)
+node_modules.old/
 
 # audio assets (SFX downloads/cache, uploaded sources, generated audio)
 *.mp3

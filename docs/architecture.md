@@ -417,13 +417,13 @@ The backend exposes interactive docs at `/docs`, which is helpful for inspecting
 
 The active backend entry point is:
 
-- `backend/src/main_refactored.py`
+- `backend/src/app.py` (kanonik, ADR-002 — shim `backend/src/main_refactored.py` compat hingga V2+1, `uv run uvicorn src.app:app`)
 
 The legacy monolithic file still exists:
 
-- `backend/src/main.py`
+- `backend/src/main.py` (pre-refactor, jangan pakai untuk pekerjaan baru)
 
-For new work, use the refactored entry point and layered route structure.
+For new work, use `src.app:app` and the layered route structure. `run.ps1` tetap kanonik launcher (bun + uv, `bun.lock` text, ports 3107/8000). Toolchain pins: `.prototools` → `node 22.23.2`/`bun 1.2.18`/`python 3.12.5`/`uv 0.9.7` tanpa deno.
 
 ## Related Reading
 

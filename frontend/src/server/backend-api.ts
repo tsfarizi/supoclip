@@ -1,4 +1,6 @@
-import { buildBackendAuthHeaders } from "@/lib/backend-auth";
+import "server-only";
+
+import { buildBackendAuthHeaders } from "@/server/backend-auth";
 
 export const DEFAULT_FORWARDED_HEADERS = [
   "accept-ranges",

@@ -21,7 +21,7 @@ import {
   VolumeX,
 } from "lucide-react";
 import { useSession } from "@/lib/auth-client";
-import { formatSupportMessage, parseApiError } from "@/lib/api-error";
+import { buildSupportError } from "@/lib/api-client";
 import { buildClipDownloadFilename } from "@/lib/clip-download";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -173,11 +173,6 @@ export default function TaskEditPage() {
 
   const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
-  const buildSupportError = useCallback(async (response: Response, fallbackMessage: string) => {
-    const parsed = await parseApiError(response, fallbackMessage);
-    return formatSupportMessage(parsed);
-  }, []);
-
   const fetchEditorData = useCallback(async () => {
     if (!params.id) return;
     setError(null);
@@ -214,7 +209,7 @@ export default function TaskEditPage() {
     } catch (fetchError) {
       setError(fetchError instanceof Error ? fetchError.message : "Failed to load editor");
     }
-  }, [buildSupportError, params.id, taskApiUrl]);
+  }, [params.id, taskApiUrl]);
 
   useEffect(() => {
     const run = async () => {

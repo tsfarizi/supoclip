@@ -112,7 +112,7 @@ BETTER_AUTH_SECRET=change_this_in_production
 ### 2. Start the Services
 
 ```powershell
-proto install   # One-time: pinned toolchain (node/pnpm/python/deno/uv)
+proto install   # One-time: pinned toolchain (node/bun/python/uv)
 .\run.ps1       # Start worker, API, frontend (+ auto-bootstrap Postgres/Redis)
 ```
 
@@ -127,7 +127,7 @@ Stop everything with `.\stop.ps1`.
 
 ### 3. Wait for Initialization
 
-First-time startup installs dependencies (backend `uv sync`, frontend `pnpm install`).
+First-time startup installs dependencies (backend `uv sync`, frontend `bun install`).
 Check progress in `.local/logs/` (`backend.*.log`, `worker.*.log`, `frontend.*.log`).
 
 ### 4. Access the App
@@ -195,11 +195,13 @@ SupoClip now has a layered automated test setup:
 App-level entrypoints:
 
 ```bash
-cd backend && uv run pytest
-cd e2e && pnpm exec playwright test
+cd backend  && uv run pytest            # gate narrow-scope auth+billing ≥65% (lihat backend/pyproject.toml; ekspansi --cov=src ditunda)
+cd frontend && bun run lint
+cd frontend && bunx tsc --noEmit
+cd e2e      && bunx playwright test
 ```
 
-Local test runs expect PostgreSQL and Redis to be available. The easiest path is to start the stack with `.\run.ps1`, then run the commands above. CI runs the same layers in GitHub Actions with Postgres and Redis service containers.
+Local test runs expect PostgreSQL and Redis to be available. The easiest path is to start the stack with `.\run.ps1`, then run the commands above. CI runs the same layers in GitHub Actions with Postgres and Redis service containers. Toolchain pins `.prototools` → `node 22.23.2`/`bun 1.2.18`/`python 3.12.5`/`uv 0.9.7` tanpa deno; lock `frontend/bun.lock` text; entry kanonik `uv run uvicorn src.app:app` (shim `src.main_refactored:app` compat); ports 3107/8000 tetap.
 
 ## Documentation
 

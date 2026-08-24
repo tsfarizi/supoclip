@@ -24,7 +24,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useSession } from "@/lib/auth-client";
-import { formatSupportMessage, parseApiError } from "@/lib/api-error";
+import { buildSupportError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import {
   ArrowLeft,
@@ -70,10 +70,7 @@ async function fetchTasksList() {
   return (data.tasks || []) as Task[];
 }
 
-async function buildSupportError(response: Response, fallbackMessage: string) {
-  const parsed = await parseApiError(response, fallbackMessage);
-  return formatSupportMessage(parsed);
-}
+
 
 const STATUS_CONFIG: Record<
   string,

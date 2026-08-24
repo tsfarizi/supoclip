@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { formatSupportMessage, parseApiError } from "@/lib/api-error";
+import { buildSupportError } from "@/lib/api-client";
 import { Clip, TaskDetails } from "@/lib/task-types";
 
 export interface UseTaskQueryOptions {
@@ -42,11 +42,7 @@ export function useTaskQuery(
       }
 
       if (!response.ok) {
-        const info = await parseApiError(
-          response,
-          `Failed to fetch task: ${response.status}`
-        );
-        throw new Error(formatSupportMessage(info));
+        throw new Error(await buildSupportError(response, `Failed to fetch task: ${response.status}`));
       }
 
       // The backend returns the task object with clips nested; the wrapper

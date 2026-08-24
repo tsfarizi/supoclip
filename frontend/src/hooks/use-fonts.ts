@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { buildSupportError } from "@/lib/api-client";
 import { FontOption } from "@/lib/task-types";
 
 export function useFonts(): {
@@ -16,7 +17,7 @@ export function useFonts(): {
     try {
       const response = await fetch("/api/fonts", { cache: "no-store" });
       if (!response.ok) {
-        throw new Error(`Failed to load fonts (${response.status})`);
+        throw new Error(await buildSupportError(response, `Failed to load fonts (${response.status})`));
       }
       const data = (await response.json()) as { fonts?: FontOption[] };
       setFonts(data.fonts ?? []);

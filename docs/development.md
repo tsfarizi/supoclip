@@ -35,30 +35,29 @@ proto install   # one-time: pinned toolchain
 
 ```bash
 cd frontend
-pnpm install
-pnpm run dev
-pnpm run build
-pnpm run start
-pnpm run lint
+bun install
+bun run dev
+bun run build
+bun run start
+bun run lint
 ```
 
 ## Backend
 
 ```bash
 cd backend
-uv venv .venv
-source .venv/bin/activate
 uv sync
-uvicorn src.main_refactored:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn src.app:app --reload --host 0.0.0.0 --port 8000  # shim src.main_refactored:app compat
 ```
 
 Run the worker separately:
 
 ```bash
 cd backend
-source .venv/bin/activate
-arq src.workers.tasks.WorkerSettings
+uv run arq src.workers.tasks.WorkerSettings  # shim src.worker.WorkerSettings compat
 ```
+
+> Toolchain pins: `.prototools` → `node 22.23.2`, `bun 1.2.18`, `python 3.12.5`, `uv 0.9.7` (tanpa deno). Frontend lock kanonik `bun.lock` (text, `bun install --frozen-lockfile`).
 
 ## Frontend Development Notes
 
@@ -69,7 +68,11 @@ Important locations:
 - `frontend/src/components`
   - Reusable UI and product components
 - `frontend/src/lib`
-  - Auth, API helpers, backend proxy helpers, Stripe wiring
+  - Pure client-safe helpers (`lib/api-client.ts` → `fetchJson`/`apiFetch`, `lib/api-error.ts`, `lib/task-types.ts`); re-export tipis dari `server/` bila perlu
+- `frontend/src/server`
+  - Server-only boundary (`server/db.ts` singleton Prisma, `server/backend-auth.ts`, `server/stripe.ts`, `server/session.ts` — guard `import "server-only"`)
+- `frontend/src/hooks`
+  - Data-fetch hooks (`use-task-query`, `use-task-polling`, `use-clip-editor` … — lihat `docs/architecture/frontend-decomposition.md`)
 - `frontend/prisma`
   - Prisma schema and migrations, if present in your branch
 - `frontend/src/generated/prisma`
@@ -96,7 +99,7 @@ prisma generate && next build
 
 Important locations:
 
-- `backend/src/main_refactored.py`
+- `backend/src/app.py (shim backend/src/main_refactored.py)`
   - Active entry point
 - `backend/src/api/routes`
   - Route modules
@@ -231,7 +234,7 @@ Direct app-level commands:
 
 ```bash
 cd backend && uv run pytest
-cd e2e && pnpm exec playwright test
+cd e2e && bunx playwright test
 ```
 
 ### Local Test Environment
@@ -252,8 +255,15 @@ BETTER_AUTH_SECRET=supoclip_better_auth_test_secret
 
 ### Coverage and CI
 
-- Backend coverage thresholds are enforced during `pytest`.
-- Frontend unit tests were removed with Vitest; frontend verification is `pnpm run lint` plus the Playwright e2e suite in `e2e/`.
+- Backend coverage gate narrow-scope `auth+billing` `≥65%` (`--cov=src.auth_headers --cov=src.services.billing_service` — preservasi gate asli; ekspansi ke `--cov=src` ditunda hingga god modules `video_utils`/`ai` ter-strangle, lihat `docs/architecture/TARGET_ARCHITECTURE.md` §7 / `CONVENTIONS.md` §9).
+- Frontend unit tests were removed with Vitest; frontend verification is `bun run lint` + `bunx tsc --noEmit` plus the Playwright e2e suite in `e2e/`.
+- Verifikasi copy-paste kanonik:
+  ```bash
+  cd frontend && bun run lint
+  cd frontend && bunx tsc --noEmit
+  cd backend  && uv run pytest
+  cd e2e      && bunx playwright test
+  ```
 - GitHub Actions runs separate `backend`, `frontend`, and `e2e` jobs with Postgres and Redis service containers.
 - Playwright failures retain traces, screenshots, and videos for debugging.
 
@@ -297,7 +307,7 @@ Logs for every process live in `.local/logs/`:
 
 ## Safe Defaults for New Work
 
-- Prefer `backend/src/main_refactored.py` over `main.py`
+- Prefer `backend/src/app.py (shim backend/src/main_refactored.py)` over `main.py`
 - Keep auth-sensitive browser requests behind frontend API routes
 - Preserve async behavior by keeping blocking work out of FastAPI request handlers
 - Use the worker for long-running media processing

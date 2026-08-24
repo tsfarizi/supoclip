@@ -41,7 +41,7 @@ cd supoclip
 
 ### 2. Install the pinned toolchain
 
-All runtime versions (node, pnpm, python, deno, uv) are pinned in `.prototools`:
+All runtime versions (node, bun, python, uv) are pinned in `.prototools`:
 
 ```bash
 proto install
@@ -130,7 +130,7 @@ You still need PostgreSQL and Redis running.
 ```bash
 cd backend
 uv sync
-uv run uvicorn src.main_refactored:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn src.app:app --reload --host 0.0.0.0 --port 8000  # shim src.main_refactored:app compat
 ```
 
 In a second terminal:
@@ -144,8 +144,8 @@ uv run arq src.workers.tasks.WorkerSettings
 
 ```bash
 cd frontend
-pnpm install
-pnpm run dev
+bun install
+bun run dev
 ```
 
 ### MCP server (optional)
