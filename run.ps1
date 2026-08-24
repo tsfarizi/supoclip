@@ -237,9 +237,9 @@ if (-not $SkipWorker) {
     Start-Bg 'worker' $venvPy @('-m','arq','src.workers.tasks.WorkerSettings') (Join-Path $repo 'backend')
 }
 
-# API
+# API — canonical src.app:app (shim src.main_refactored:app kept for compat, ADR-002)
 if (-not (Port-Listening 8000)) {
-    Start-Bg 'backend' $venvPy @('-m','uvicorn','src.main_refactored:app','--host','127.0.0.1','--port','8000') (Join-Path $repo 'backend')
+    Start-Bg 'backend' $venvPy @('-m','uvicorn','src.app:app','--host','127.0.0.1','--port','8000') (Join-Path $repo 'backend')
 } else { Write-Ok "backend already listening on 8000" }
 
 # Frontend (production server)

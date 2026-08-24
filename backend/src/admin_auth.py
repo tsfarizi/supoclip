@@ -1,25 +1,12 @@
-from __future__ import annotations
-
-from fastapi import HTTPException, Request
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from .auth_headers import get_authenticated_user_id
-from .config import Config
-
-
-async def require_admin_user(
-    request: Request, db: AsyncSession, config: Config
-) -> str:
-    user_id = get_authenticated_user_id(request, config)
-
-    result = await db.execute(
-        text("SELECT is_admin FROM users WHERE id = :user_id"),
-        {"user_id": user_id},
-    )
-    row = result.fetchone()
-    if not row:
-        raise HTTPException(status_code=401, detail="User not found")
-    if not bool(getattr(row, "is_admin", False)):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return str(user_id)
+"""Shim re-export: canonical location is src.domain.auth.admin. Do not add logic here."""
+import warnings
+warnings.warn("src.admin_auth.py is deprecated, use src.domain.auth.admin", DeprecationWarning, stacklevel=2)
+from src.domain.auth.admin import *  # noqa: F401,F403
+import src.domain.auth.admin as _canon
+import sys as _sys
+# Re-export public names and support __getattr__ for any future additions
+globals().update({k: getattr(_canon, k) for k in dir(_canon) if not k.startswith("_")})
+def __getattr__(name):
+    return getattr(_canon, name)
+def __dir__():
+    return dir(_canon)

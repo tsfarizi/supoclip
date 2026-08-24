@@ -1,22 +1,10 @@
-"""
-Worker process entry point.
-Run this to start background job workers.
-
-Usage:
-    arq src.workers.tasks.WorkerSettings
-"""
-
-import logging
-from arq import run_worker
-from .workers.tasks import WorkerSettings
-from .config import Config
-from .observability import configure_logging
-
-configure_logging()
-
-logger = logging.getLogger(__name__)
-
-if __name__ == "__main__":
-    logger.info("Starting SupoClip worker...")
-    logger.info(f"Redis: {Config().redis_host}:{Config().redis_port}")
-    run_worker(WorkerSettings)
+"""Shim re-export: canonical location is src.worker. Do not add logic here."""
+import warnings
+warnings.warn("src.worker_main is deprecated, use src.worker", DeprecationWarning, stacklevel=2)
+from src.worker import *  # noqa: F401,F403
+import src.worker as _canon
+globals().update({k: getattr(_canon, k) for k in dir(_canon) if not k.startswith("_")})
+def __getattr__(name):
+    return getattr(_canon, name)
+def __dir__():
+    return dir(_canon)

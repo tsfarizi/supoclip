@@ -1,57 +1,12 @@
-"""Redis client factory: cached async and sync clients built from Config."""
-
-from typing import Optional
-
-import redis as redis_sync
-import redis.asyncio as redis_async
-
-from ..config import get_config
-
-_async_client: Optional[redis_async.Redis] = None
-_sync_client: Optional[redis_sync.Redis] = None
-
-
-def _connection_kwargs() -> dict:
-    config = get_config()
-    return {
-        "host": config.redis_host,
-        "port": config.redis_port,
-        "password": config.redis_password,
-        "decode_responses": True,
-    }
-
-
-def get_redis_client() -> redis_async.Redis:
-    """Return the cached async Redis client, creating it on first call."""
-    global _async_client
-    if _async_client is None:
-        _async_client = redis_async.Redis(**_connection_kwargs())
-    return _async_client
-
-
-def get_sync_redis_client() -> redis_sync.Redis:
-    """Return the cached sync Redis client, creating it on first call."""
-    global _sync_client
-    if _sync_client is None:
-        _sync_client = redis_sync.Redis(**_connection_kwargs())
-    return _sync_client
-
-
-async def close_redis_clients() -> None:
-    """Close both cached clients and reset the cache. Never raises."""
-    global _async_client, _sync_client
-    client = _async_client
-    _async_client = None
-    if client is not None:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
-
-    client = _sync_client
-    _sync_client = None
-    if client is not None:
-        try:
-            client.close()
-        except Exception:
-            pass
+"""Shim re-export: canonical location is src.infra.cache.redis_client. Do not add logic here."""
+import warnings
+warnings.warn("src.infra/redis_client.py is deprecated, use src.infra.cache.redis_client", DeprecationWarning, stacklevel=2)
+from src.infra.cache.redis_client import *  # noqa: F401,F403
+import src.infra.cache.redis_client as _canon
+import sys as _sys
+# Re-export public names and support __getattr__ for any future additions
+globals().update({k: getattr(_canon, k) for k in dir(_canon) if not k.startswith("_")})
+def __getattr__(name):
+    return getattr(_canon, name)
+def __dir__():
+    return dir(_canon)
