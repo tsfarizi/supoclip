@@ -272,6 +272,108 @@ async def process_video_task(
             # Error will be caught by arq and task status will be updated
             raise
 
+
+async def render_composition_task(
+    ctx: Dict[str, Any],
+    task_id: str,
+    clip_id: str,
+    composition_dict: dict,
+    user_id: str,
+) -> Dict[str, Any]:
+    """
+    Background worker task to export/render an editable composition.
+    
+    1. Resolves source video path using SourceAssetResolver.
+    2. Acquires concurrency slot via governor (reading current render_concurrency runtime setting).
+    3. Renders composition with RenderIntent.EXPORT.
+    4. Updates GeneratedClip row in DB (file_path, duration, filename, etc.) and increments composition_version.
+    5. Updates Redis progress (progress:{task_id}).
+    """
+    from pathlib import Path
+    from ..database import AsyncSessionLocal
+    from ..domain.media.composition import Composition, RenderIntent
+    from ..domain.media.concurrency_governor import render_slot_guard
+    from ..domain.media.render_engine import RenderEngine
+    from ..domain.media.resolver import SourceAssetResolver
+    from ..repositories.clip_repository import ClipRepository
+    from ..runtime_settings import get_render_concurrency, load_runtime_settings_cache
+    from ..shared.config import get_config
+    from ..utils.async_helpers import run_in_thread
+    from ..workers.progress import ProgressTracker
+
+    set_trace_id(f"render-{clip_id}")
+    logger.info("Worker executing render_composition_task for clip %s (task %s)", clip_id, task_id)
+
+    progress = ProgressTracker(ctx["redis"], task_id)
+    await progress.update(5, "Queued for render...", "processing")
+
+    composition = Composition.from_dict(composition_dict)
+
+    async with AsyncSessionLocal() as db:
+        await load_runtime_settings_cache(db)
+        concurrency_limit = get_render_concurrency()
+
+        # 1. Resolve source video path
+        await progress.update(10, "Resolving source media...", "processing")
+        source_path = await SourceAssetResolver.resolve(db, composition.source_asset_ref)
+
+        # 2. Acquire concurrency slot
+        await progress.update(20, "Waiting for render capacity...", "processing")
+        redis_client = ctx["redis"]
+        async with render_slot_guard(redis_client, max_concurrency=concurrency_limit, timeout=600) as acquired:
+            if not acquired:
+                await progress.error("Render timed out waiting for capacity slot")
+                raise TimeoutError("Timed out waiting for render slot")
+
+            await progress.update(30, "Rendering composition...", "processing")
+            output_dir = Path(get_config().temp_dir) / "clips"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # 3. Render composition (synchronous subprocess — offload to thread)
+            engine = RenderEngine()
+            rendered_path = await run_in_thread(
+                engine.render,
+                composition,
+                source_path,
+                output_dir,
+                RenderIntent.export,
+            )
+
+            from ..video_utils import ffprobe_duration
+            duration = ffprobe_duration(rendered_path)
+
+            # 4. Update GeneratedClip row in DB and increment composition_version
+            await progress.update(90, "Saving rendered clip...", "processing")
+            clip_row = await ClipRepository.get_clip_by_id(db, clip_id)
+            current_version = (clip_row.get("composition_version") if clip_row else 1) or 1
+            new_version = current_version + 1
+
+            await ClipRepository.update_clip_render_result(
+                db,
+                clip_id=clip_id,
+                filename=rendered_path.name,
+                file_path=str(rendered_path),
+                duration=duration,
+                composition_json=composition.to_json(),
+                composition_version=new_version,
+            )
+
+            # 5. Complete progress
+            updated_clip = await ClipRepository.get_clip_by_id(db, clip_id)
+            if updated_clip:
+                await progress.clip_ready(clip_row.get("clip_order", 1) if clip_row else 1, 1, updated_clip)
+            await progress.complete("Render complete!")
+
+            logger.info("Successfully rendered composition for clip %s to %s", clip_id, rendered_path)
+            return {
+                "task_id": task_id,
+                "clip_id": clip_id,
+                "file_path": str(rendered_path),
+                "duration": duration,
+                "composition_version": new_version,
+            }
+
+
 # Worker configuration for arq
 class WorkerSettings:
     """Configuration for arq worker."""
@@ -282,7 +384,7 @@ class WorkerSettings:
     config = Config()
 
     # Functions to run
-    functions = [process_video_task]
+    functions = [process_video_task, render_composition_task]
     queue_name = "supoclip_tasks"
 
     # Redis settings from environment

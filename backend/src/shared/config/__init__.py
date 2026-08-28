@@ -1,7 +1,15 @@
 from dotenv import load_dotenv
 import os
 
-from .runtime_settings import get_cached_setting, setting_prefers_admin
+from .runtime_settings import (
+    DEFAULT_RENDER_CONCURRENCY,
+    MAX_RENDER_CONCURRENCY,
+    MIN_RENDER_CONCURRENCY,
+    get_cached_setting,
+    get_render_concurrency,
+    set_render_concurrency,
+    setting_prefers_admin,
+)
 
 load_dotenv()
 
@@ -80,6 +88,7 @@ class Config:
         self.ffmpeg_bin_dir = (
             self.get_optional_env("FFMPEG_BIN_DIR") or DEFAULT_FFMPEG_BIN_DIR
         )
+        self.render_concurrency = get_render_concurrency()
 
         # Persistent YouTube source-video cache. Keyed by canonical video ID so
         # repeated tasks on the same video skip the download entirely.
@@ -185,6 +194,7 @@ class Config:
             "APIFY_API_TOKEN": self.apify_api_token,
             "PEXELS_API_KEY": self.pexels_api_key,
             "FREESOUND_API_KEY": self.freesound_api_key,
+            "RENDER_CONCURRENCY": str(get_render_concurrency()),
         }
 
     @staticmethod

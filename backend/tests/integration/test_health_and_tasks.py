@@ -52,7 +52,7 @@ async def test_database_health_returns_503_when_the_database_is_unavailable(
         "/tasks/shared/{share_token}/clips/{clip_id}/file",
         "/tasks/{task_id}/clips/{clip_id}/file",
         "/tasks/{task_id}/clips/{clip_id}/export",
-        "/fonts/{font_name}",
+        "/media/fonts/{font_name}",
     ],
 )
 def test_database_backed_file_routes_release_sessions_before_streaming(app, path):
@@ -248,7 +248,7 @@ async def test_upload_video_uses_runtime_config_temp_dir(
     app.state.config.temp_dir = str(tmp_path)
 
     response = await client.post(
-        "/upload",
+        "/media/upload",
         headers=auth_headers,
         files={"video": ("demo.mp4", b"video-bytes", "video/mp4")},
     )

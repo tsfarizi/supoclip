@@ -90,7 +90,9 @@ EXPECTED_COLUMNS = {
         "id", "task_id", "filename", "file_path", "start_time", "end_time",
         "duration", "text", "relevance_score", "reasoning", "clip_order",
         "virality_score", "hook_score", "engagement_score", "value_score",
-        "shareability_score", "hook_type", "hook_title", "created_at",
+        "shareability_score", "hook_type", "hook_title", "description",
+        "hashtags", "metadata_status", "metadata_version", "metadata_prompt_version",
+        "composition_json", "composition_version", "created_at",
         "updated_at",
     },
     "processing_cache": {
@@ -299,13 +301,13 @@ async def test_upgrade_empty_database_converges_to_head_and_is_idempotent():
         )
 
         # Head version stamped.
-        assert _scratch_count(db_name, "SELECT version_num FROM alembic_version;") == "0004"
+        assert _scratch_count(db_name, "SELECT version_num FROM alembic_version;") == "0006"
 
         # Idempotency: a second upgrade head is a no-op and stays at head.
         _run_alembic(db_name, "upgrade", "head")
         schema_after = await _inspect_schema(db_name)
         assert schema_after == schema, "second upgrade head changed the schema"
-        assert _scratch_count(db_name, "SELECT version_num FROM alembic_version;") == "0004"
+        assert _scratch_count(db_name, "SELECT version_num FROM alembic_version;") == "0006"
     finally:
         _drop_scratch_db(db_name)
 
@@ -409,6 +411,8 @@ async def test_downgrade_round_trip_preserves_data():
         assert result.returncode == 0, f"seed failed: {result.stderr}"
 
         # Step through each downgrade revision.
+        _run_alembic(db_name, "downgrade", "0005")
+        _run_alembic(db_name, "downgrade", "0004")
         _run_alembic(db_name, "downgrade", "0003")
         _run_alembic(db_name, "downgrade", "0002")
         _run_alembic(db_name, "downgrade", "0001")
@@ -427,7 +431,7 @@ async def test_downgrade_round_trip_preserves_data():
             "SELECT (SELECT count(*) FROM users)||'/'||(SELECT count(*) FROM sources)||'/'||"
             "(SELECT count(*) FROM tasks)||'/'||(SELECT count(*) FROM generated_clips);",
         ) == "1/1/2/1"
-        assert _scratch_count(db_name, "SELECT version_num FROM alembic_version;") == "0004"
+        assert _scratch_count(db_name, "SELECT version_num FROM alembic_version;") == "0006"
         # The non-terminal row was re-backfilled after the column round-trip.
         assert _scratch_count(
             db_name, "SELECT source_identity FROM tasks WHERE id='t1';"

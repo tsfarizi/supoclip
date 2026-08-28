@@ -10,7 +10,7 @@ export type RuntimeSetting = {
   key: string;
   label: string;
   description: string;
-  input_type: "password" | "text";
+  input_type: "password" | "text" | "number";
   source: "environment" | "admin" | "unset";
   configured: boolean;
   has_admin_value: boolean;
@@ -131,6 +131,8 @@ export function RuntimeSettingsForm({ settings }: RuntimeSettingsFormProps) {
             <div>
               <input
                 type={setting.input_type}
+                min={setting.key === "RENDER_CONCURRENCY" ? 1 : undefined}
+                max={setting.key === "RENDER_CONCURRENCY" ? 8 : undefined}
                 value={values[setting.key] ?? ""}
                 onChange={(event) =>
                   setValues((current) => ({
@@ -145,6 +147,11 @@ export function RuntimeSettingsForm({ settings }: RuntimeSettingsFormProps) {
                 autoComplete="off"
               />
               <p className="mt-1 text-xs text-gray-600">{setting.description}</p>
+              {setting.key === "RENDER_CONCURRENCY" && (values[setting.key] === "1" || (!values[setting.key] && setting.configured)) && (
+                <p className="mt-1 text-xs text-blue-700 font-medium">
+                  Single process mode: render requests are held in FIFO queue.
+                </p>
+              )}
               {setting.overridden_by_env && (
                 <p className="mt-1 text-xs text-amber-700">
                   The saved admin value is present but ignored while the env var is set.

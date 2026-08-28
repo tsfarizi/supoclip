@@ -641,7 +641,35 @@ class TaskService:
             if clip_info is None:
                 continue  # Skip failed clip
 
-            # Save to DB immediately (with clip marketing metadata)
+            # Build Composition for newly created clip
+            from ..domain.media.composition_builder import CompositionBuilder
+            from ..domain.media.composition import SourceAssetRef
+
+            task_row = None
+            try:
+                task_row = await self.task_repo.get_task_by_id(self.db, task_id)
+            except Exception:
+                pass
+            source_ref = SourceAssetRef(
+                source_id=task_row.get("source_id") if isinstance(task_row, dict) else None,
+                source_type=task_row.get("source_type") if isinstance(task_row, dict) else None,
+                source_url=task_row.get("source_url") if isinstance(task_row, dict) else None,
+                source_identity=task_row.get("source_identity") if isinstance(task_row, dict) else None,
+            )
+            composition = CompositionBuilder.build_from_segment(
+                segment=segment,
+                source_ref=source_ref,
+                output_format=output_format,
+                font_family=font_family,
+                font_size=font_size,
+                font_color=font_color,
+                caption_template=caption_template,
+                broll_opps=segment.get("broll_suggestions") or segment.get("broll_opportunities"),
+                sfx_opps=segment.get("sfx_opportunities"),
+            )
+            composition_json = composition.to_json()
+
+            # Save to DB immediately (with clip marketing metadata and composition)
             from ..clip_metadata import CLIP_METADATA_VERSION
 
             clip_id = await self.clip_repo.create_clip(
@@ -668,6 +696,8 @@ class TaskService:
                 metadata_status=segment.get("metadata_status") or "pending",
                 metadata_version=segment.get("metadata_version") or CLIP_METADATA_VERSION,
                 metadata_prompt_version=segment.get("metadata_prompt_version") or CLIP_METADATA_VERSION,
+                composition_json=composition_json,
+                composition_version=1,
             )
             # ClipRepository.create_clip owns its commit (it mirrors
             # TaskRepository.create_task); no second commit here so the

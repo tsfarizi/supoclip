@@ -10,3 +10,4 @@ def __getattr__(name):
     return getattr(_canon, name)
 def __dir__():
     return dir(_canon)
+

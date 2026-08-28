@@ -73,6 +73,11 @@ SETTING_METADATA = {
         "description": "Optional B-roll stock footage provider key.",
         "input_type": "password",
     },
+    "RENDER_CONCURRENCY": {
+        "label": "Render Concurrency",
+        "description": "Maximum number of simultaneous clip renders (1-8).",
+        "input_type": "number",
+    },
 }
 
 

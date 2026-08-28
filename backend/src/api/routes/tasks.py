@@ -989,6 +989,363 @@ watermark=watermark,
         )
 
 
+@router.get("/{task_id}/clips/{clip_id}/composition")
+async def get_clip_composition(
+    task_id: str,
+    clip_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetch editable composition for a clip.
+    If composition_json is null, lazily constructs default composition, saves it, and returns it.
+    """
+    try:
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+        clip = await task_service.clip_repo.get_clip_by_id(db, clip_id)
+        if not clip or clip.get("task_id") != task_id:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        comp_json = clip.get("composition_json")
+        comp_version = clip.get("composition_version") or 1
+
+        if comp_json:
+            try:
+                comp_dict = json.loads(comp_json)
+                return {
+                    "composition": comp_dict,
+                    "composition_version": comp_version,
+                }
+            except Exception as e:
+                logger.warning("Corrupt composition_json on clip %s: %s; re-building", clip_id, e)
+
+        # Lazy backfill / build default composition
+        from pathlib import Path
+        from ...domain.media.composition import (
+            AudioSpec,
+            CaptionSpec,
+            Composition,
+            OutputSpec,
+            ReframeMode,
+            ReframeSpec,
+            SegmentSpec,
+            SourceAssetRef,
+            SpeedSpec,
+        )
+        from ...domain.media.source_map import load_clip_source_manifest, load_clip_source_ranges
+        from ...video_utils import parse_timestamp_to_seconds
+
+        task_record = await task_service.task_repo.get_task_by_id(db, task_id)
+        source = None
+        if task_record and task_record.get("source_id"):
+            source = await task_service.source_repo.get_source_by_id(db, task_record["source_id"])
+
+        clip_path_str = clip.get("file_path")
+        clip_path = Path(clip_path_str) if clip_path_str else None
+
+        manifest = load_clip_source_manifest(clip_path) if (clip_path and clip_path.exists()) else None
+        if manifest is None and clip_path and clip_path.exists():
+            ranges = load_clip_source_ranges(clip_path)
+            if ranges:
+                manifest = {"source_ranges": ranges, "main_ranges": ranges, "hook_range": None}
+
+        source_ref = SourceAssetRef(
+            source_id=task_record.get("source_id") if task_record else None,
+            source_type=source.get("type") if source else None,
+            source_url=source.get("url") if source else None,
+            source_identity=task_record.get("source_identity") if task_record else None,
+        )
+
+        caption_spec = CaptionSpec(
+            text_override=None,
+            font_family=task_record.get("font_family") if task_record else None,
+            font_size=task_record.get("font_size") if task_record else None,
+            font_color=task_record.get("font_color") if task_record else None,
+            template=task_record.get("caption_template", "default") if task_record else "default",
+            position="bottom",
+            highlight_words=[],
+        )
+
+        segments: list[SegmentSpec] = []
+        if manifest and manifest.get("source_ranges"):
+            hook_r = manifest.get("hook_range")
+            main_rs = manifest.get("main_ranges") or manifest.get("source_ranges")
+
+            if hook_r:
+                segments.append(
+                    SegmentSpec(
+                        id=f"hook_{clip_id[:8]}",
+                        source_start=round(float(hook_r[0]), 3),
+                        source_end=round(float(hook_r[1]), 3),
+                        reframe=ReframeSpec(mode=ReframeMode.track),
+                        speed=SpeedSpec(rate=1.0),
+                        audio=AudioSpec(take_source=True, gain_db=0.0),
+                        caption=caption_spec.model_copy(),
+                    )
+                )
+
+            for idx, r in enumerate(main_rs):
+                segments.append(
+                    SegmentSpec(
+                        id=f"seg_{clip_id[:8]}_{idx}",
+                        source_start=round(float(r[0]), 3),
+                        source_end=round(float(r[1]), 3),
+                        reframe=ReframeSpec(mode=ReframeMode.track),
+                        speed=SpeedSpec(rate=1.0),
+                        audio=AudioSpec(take_source=True, gain_db=0.0),
+                        caption=caption_spec.model_copy(),
+                    )
+                )
+        else:
+            s_start = parse_timestamp_to_seconds(str(clip.get("start_time") or "00:00"))
+            s_end = parse_timestamp_to_seconds(str(clip.get("end_time") or "00:00"))
+            if s_end <= s_start:
+                s_end = s_start + max(1.0, float(clip.get("duration") or 1.0))
+
+            segments.append(
+                SegmentSpec(
+                    id=f"seg_{clip_id[:8]}",
+                    source_start=round(s_start, 3),
+                    source_end=round(s_end, 3),
+                    reframe=ReframeSpec(mode=ReframeMode.track),
+                    speed=SpeedSpec(rate=1.0),
+                    audio=AudioSpec(take_source=True, gain_db=0.0),
+                    caption=caption_spec.model_copy(),
+                )
+            )
+
+        output_spec = OutputSpec(
+            format="vertical",
+            preset="tiktok",
+        )
+
+        comp = Composition(
+            schema_version=1,
+            source_asset_ref=source_ref,
+            output=output_spec,
+            segments=segments,
+            broll_inserts=[],
+            sfx=[],
+            soundtrack=None,
+            transitions=[],
+        )
+
+        saved_version = 1
+        await task_service.clip_repo.update_clip_composition(
+            db, clip_id=clip_id, composition_json=comp.to_json(), composition_version=saved_version
+        )
+
+        return {
+            "composition": comp.to_dict(),
+            "composition_version": saved_version,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching clip composition: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching clip composition: {str(e)}"
+        )
+
+
+@router.patch("/{task_id}/clips/{clip_id}/composition")
+async def update_clip_composition(
+    task_id: str,
+    clip_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update editable composition JSON for a clip with optimistic concurrency control.
+    """
+    try:
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+        clip = await task_service.clip_repo.get_clip_by_id(db, clip_id)
+        if not clip or clip.get("task_id") != task_id:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        payload = await request.json()
+        composition_data = payload.get("composition")
+        base_version = payload.get("base_version")
+
+        if composition_data is None or base_version is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Request body must contain 'composition' object and 'base_version' integer",
+            )
+
+        current_version = clip.get("composition_version") or 1
+        try:
+            base_version = int(base_version)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="base_version must be an integer",
+            )
+        if current_version != base_version:
+            raise HTTPException(
+                status_code=409,
+                detail="Composition was modified by another request. Please reload.",
+            )
+
+        # Validate composition structure
+        from ...domain.media.composition import Composition
+        try:
+            comp = Composition.from_dict(composition_data)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid composition structure: {str(exc)}",
+            )
+
+        new_version = current_version + 1
+        serialized_json = comp.to_json()
+
+        updated = await task_service.clip_repo.update_clip_composition(
+            db,
+            clip_id=clip_id,
+            composition_json=serialized_json,
+            composition_version=new_version,
+            expected_version=current_version,
+        )
+        if not updated:
+            raise HTTPException(
+                status_code=409,
+                detail="Composition was modified by another request. Please reload.",
+            )
+
+        return {
+            "composition": comp.to_dict(),
+            "composition_version": new_version,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating composition: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error updating composition: {str(e)}"
+        )
+
+
+@router.post("/{task_id}/clips/{clip_id}/composition/render")
+async def render_clip_composition(
+    task_id: str,
+    clip_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Render composition preview inline or enqueue full export job.
+    """
+    try:
+        task_service = TaskService(db)
+        task = await _require_task_owner(request, task_service, db, task_id)
+        clip = await task_service.clip_repo.get_clip_by_id(db, clip_id)
+        if not clip or clip.get("task_id") != task_id:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        payload = await request.json()
+        intent = str(payload.get("intent", "preview")).lower().strip()
+        if intent not in ("preview", "export"):
+            raise HTTPException(
+                status_code=400,
+                detail="intent must be either 'preview' or 'export'",
+            )
+
+        comp_json = clip.get("composition_json")
+        if not comp_json:
+            # Generate default composition if missing
+            get_comp_resp = await get_clip_composition(task_id, clip_id, request, db)
+            comp_dict = get_comp_resp["composition"]
+        else:
+            comp_dict = json.loads(comp_json)
+
+        from ...domain.media.composition import Composition, RenderIntent
+        from ...domain.media.concurrency_governor import acquire_render_slot, release_render_slot
+        from ...domain.media.render_engine import RenderEngine
+        from ...domain.media.resolver import SourceAssetResolver
+        from ...shared.config.runtime_settings import get_render_concurrency
+        from ...utils.async_helpers import run_in_thread
+
+        comp = Composition.from_dict(comp_dict)
+        redis_client = get_redis_client()
+        concurrency_limit = get_render_concurrency()
+
+        if intent == "preview":
+            # Try to acquire slot with short initial timeout
+            slot_acquired = await acquire_render_slot(
+                redis_client, max_concurrency=concurrency_limit, timeout=5
+            )
+            if not slot_acquired:
+                return {
+                    "status": "queued",
+                    "message": "Render request queued waiting for slot",
+                }
+
+            try:
+                source_path = await SourceAssetResolver.resolve(db, comp.source_asset_ref)
+                output_dir = Path(get_config().temp_dir) / "clips"
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                engine = RenderEngine()
+                preview_file = await run_in_thread(
+                    engine.render,
+                    comp,
+                    source_path,
+                    output_dir,
+                    RenderIntent.preview,
+                )
+
+                from ...video_utils import ffprobe_duration
+                duration = ffprobe_duration(preview_file)
+
+                return {
+                    "status": "ready",
+                    "preview_url": f"/api/media/clips/{preview_file.name}",
+                    "duration": duration,
+                }
+            finally:
+                await release_render_slot(redis_client)
+
+        elif intent == "export":
+            # Intent = "export": enqueue render_composition_task in arq worker (or background queue)
+            queue_adapter = getattr(request.app.state, "queue_adapter", JobQueue)
+            user_id = task.get("user_id") or ""
+            job_id = None
+            try:
+                job_id = await queue_adapter.enqueue_job(
+                    "render_composition_task",
+                    task_id=task_id,
+                    clip_id=clip_id,
+                    composition_dict=comp.to_dict(),
+                    user_id=user_id,
+                )
+            except Exception as e:
+                logger.warning("Could not enqueue render_composition_task to arq pool (%s); returning error", e)
+                raise HTTPException(
+                    status_code=503,
+                    detail="Background render queue is unavailable. Please try again later.",
+                )
+
+            return {
+                "status": "processing",
+                "job_id": job_id,
+                "message": "Export job queued",
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rendering composition: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error rendering composition: {str(e)}"
+        )
+
+
 @router.get("/{task_id}/clips/{clip_id}/export")
 async def export_clip(
     task_id: str,

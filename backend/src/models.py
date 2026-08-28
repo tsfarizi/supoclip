@@ -289,6 +289,12 @@ class GeneratedClip(Base):
         String(40), nullable=True
     )
 
+    # Editable composition architecture
+    composition_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    composition_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=sql_text("'1'")
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

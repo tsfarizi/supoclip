@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Depends
 
 logger = logging.getLogger(__name__)
-router = APIRouter(tags=["media"])
+router = APIRouter(prefix="/media", tags=["media"])
 MAX_FONT_UPLOAD_BYTES = 10 * 1024 * 1024
 
 _BUNDLED_TRANSITIONS_DIR = (
@@ -527,3 +527,27 @@ async def upload_video(request: Request, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.error(f"❌ Error uploading video: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error uploading video: {str(e)}")
+
+
+@router.get("/clips/{filename}")
+async def serve_preview_clip(filename: str):
+    """Serve a preview or rendered clip from the temp clips directory."""
+    # Sanitize filename
+    safe_filename = Path(filename).name
+    if not safe_filename.endswith(".mp4") or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid clip filename")
+
+    config = get_config()
+    clip_path = Path(config.temp_dir) / "clips" / safe_filename
+
+    if not clip_path.is_file():
+        raise HTTPException(status_code=404, detail="Preview clip not found")
+
+    return FileResponse(
+        path=str(clip_path),
+        media_type="video/mp4",
+        filename=safe_filename,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, no-cache"},
+    )
+

@@ -112,6 +112,10 @@ CREATE TABLE generated_clips (
     metadata_version VARCHAR(20),
     metadata_prompt_version VARCHAR(40),
 
+    -- Editable composition architecture
+    composition_json TEXT,
+    composition_version INTEGER NOT NULL DEFAULT 1,
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

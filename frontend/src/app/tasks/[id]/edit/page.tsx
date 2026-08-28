@@ -13,8 +13,10 @@ import {
   Layers,
   Loader2,
   Palette,
+  Play,
   RotateCcw,
   Scissors,
+  Sparkles,
   SplitSquareVertical,
   Subtitles,
   Volume2,
@@ -32,6 +34,10 @@ import { Slider } from "@/components/ui/slider";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { getHookTypeLabel, type MergeClipsPayload } from "@/lib/task-types";
+import type { Composition, CompositionResponse, ReframeSpec, SpeedSpec, AudioSpec, SoundFxSpec, BrollInsertSpec } from "@/lib/composition-types";
+import { FramingControl } from "@/components/editor/framing-control";
+import { TimelineControls } from "@/components/editor/timeline-controls";
+
 
 interface TaskDetails {
   id: string;
@@ -128,6 +134,20 @@ export default function TaskEditPage() {
   const [videoFx, setVideoFx] = useState<VideoFx>(DEFAULT_VIDEO_FX);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Editable Composition State
+  const [composition, setComposition] = useState<Composition | null>(null);
+  const [compositionVersion, setCompositionVersion] = useState<number>(1);
+  const [isCompLoading, setIsCompLoading] = useState(false);
+  const [isCompSaving, setIsCompSaving] = useState(false);
+  const [activeEditorTab, setActiveEditorTab] = useState<"trim" | "framing" | "timeline" | "subtitles" | "effects">("framing");
+
+  // Preview & Server Render State
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isPreviewRendering, setIsPreviewRendering] = useState(false);
+  const [isExportingFull, setIsExportingFull] = useState(false);
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
+  const [conflictError, setConflictError] = useState<string | null>(null);
 
   const [exportPreset, setExportPreset] = useState("tiktok");
   const [exportProgress, setExportProgress] = useState<number | null>(null);
@@ -243,18 +263,132 @@ export default function TaskEditPage() {
     };
   }, []);
 
+  // Fetch composition when clip is selected
+  const fetchComposition = useCallback(async (clipId: string) => {
+    if (!params.id) return;
+    setIsCompLoading(true);
+    setConflictError(null);
+    try {
+      const resp = await fetch(`${taskApiUrl}/${params.id}/clips/${clipId}/composition`, {
+        cache: "no-store",
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as CompositionResponse;
+        setComposition(data.composition);
+        setCompositionVersion(data.composition_version);
+      }
+    } catch (err) {
+      console.error("Failed to load composition", err);
+    } finally {
+      setIsCompLoading(false);
+    }
+  }, [params.id, taskApiUrl]);
+
   useEffect(() => {
-    if (!selectedClip) return;
-    const safeDuration = Math.max(selectedClip.duration, MIN_GAP_SECONDS * 2);
-    setTrimRange([0, safeDuration]);
-    setSplitTime(clamp(safeDuration / 2, MIN_GAP_SECONDS, safeDuration - MIN_GAP_SECONDS));
-    setCaptionText(selectedClip.text || "");
-    setHighlightWords([]);
-    setCurrentTime(0);
-    setVideoFx(DEFAULT_VIDEO_FX);
-    setSubtitleY(78);
-    setSubtitleSize(52);
-  }, [selectedClip]);
+    if (selectedClipId) {
+      setPreviewUrl(null);
+      void fetchComposition(selectedClipId);
+    }
+  }, [selectedClipId, fetchComposition]);
+
+  const handleSaveComposition = async () => {
+    if (!selectedClip || !params.id || !composition) return;
+    setIsCompSaving(true);
+    setConflictError(null);
+    setSaveSuccessMsg(null);
+    try {
+      const resp = await fetch(`${taskApiUrl}/${params.id}/clips/${selectedClip.id}/composition`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          composition,
+          base_version: compositionVersion,
+        }),
+      });
+
+      if (resp.status === 409) {
+        const errPayload = await resp.json().catch(() => ({}));
+        setConflictError(errPayload.detail || "Composition was modified by another request. Please reload.");
+        return;
+      }
+
+      if (!resp.ok) {
+        throw new Error(await buildSupportError(resp, "Failed to save composition"));
+      }
+
+      const data = (await resp.json()) as CompositionResponse;
+      setComposition(data.composition);
+      setCompositionVersion(data.composition_version);
+      setSaveSuccessMsg("Composition saved!");
+      setTimeout(() => setSaveSuccessMsg(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save composition");
+    } finally {
+      setIsCompSaving(false);
+    }
+  };
+
+  const handleRenderPreview = async () => {
+    if (!selectedClip || !params.id) return;
+    setIsPreviewRendering(true);
+    setError(null);
+    try {
+      // First save current changes
+      if (composition) {
+        await handleSaveComposition();
+      }
+
+      const resp = await fetch(`${taskApiUrl}/${params.id}/clips/${selectedClip.id}/composition/render`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent: "preview" }),
+      });
+
+      if (!resp.ok) {
+        throw new Error(await buildSupportError(resp, "Failed to request preview render"));
+      }
+
+      const data = await resp.json();
+      if (data.status === "ready" && data.preview_url) {
+        setPreviewUrl(data.preview_url);
+      } else if (data.status === "queued") {
+        setSaveSuccessMsg("Render queued waiting for capacity...");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to render preview");
+    } finally {
+      setIsPreviewRendering(false);
+    }
+  };
+
+  const handleExportFullComposition = async () => {
+    if (!selectedClip || !params.id) return;
+    setIsExportingFull(true);
+    setError(null);
+    try {
+      if (composition) {
+        await handleSaveComposition();
+      }
+
+      const resp = await fetch(`${taskApiUrl}/${params.id}/clips/${selectedClip.id}/composition/render`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent: "export" }),
+      });
+
+      if (!resp.ok) {
+        throw new Error(await buildSupportError(resp, "Failed to start full export"));
+      }
+
+      const data = await resp.json();
+      setSaveSuccessMsg("Export job enqueued! Video will update when render finishes.");
+      setTimeout(() => setSaveSuccessMsg(null), 5000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to export composition");
+    } finally {
+      setIsExportingFull(false);
+    }
+  };
 
   useEffect(() => {
     const video = videoRef.current;
@@ -711,19 +845,110 @@ export default function TaskEditPage() {
                 <CardContent className="p-4 lg:p-5 space-y-4">
                   {selectedClip ? (
                     <>
-                      <div className="rounded-xl bg-black overflow-hidden relative flex items-center justify-center">
+                      <div className="rounded-xl bg-black overflow-hidden relative flex items-center justify-center min-h-[360px]">
                         <video
                           ref={videoRef}
-                          key={selectedClip.id}
-                          src={getClipUrl(selectedClip.video_url)}
+                          key={previewUrl || selectedClip.id}
+                          src={previewUrl ? getClipUrl(previewUrl) : getClipUrl(selectedClip.video_url)}
                           controls
                           onTimeUpdate={handleTimeUpdate}
                           onPlay={() => setIsPlaying(true)}
                           onPause={() => setIsPlaying(false)}
                           className="max-h-150 max-w-full h-auto w-auto object-contain"
-                          style={videoStyle}
+                          style={previewUrl ? undefined : videoStyle}
                         />
+                        {previewUrl && (
+                          <div className="absolute top-3 left-3 bg-black/70 backdrop-blur text-white text-xs px-2.5 py-1 rounded-full flex items-center gap-1.5 border border-white/20">
+                            <Sparkles className="w-3 h-3 text-yellow-400" />
+                            <span>Composition Preview Active</span>
+                          </div>
+                        )}
                       </div>
+
+                      {/* Preview & Export Bar */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-gray-50 border rounded-lg">
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleRenderPreview}
+                            disabled={isPreviewRendering || isCompSaving}
+                            className="bg-white border hover:bg-gray-100 text-xs"
+                          >
+                            {isPreviewRendering ? (
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                                Rendering Preview...
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-3.5 h-3.5 mr-1.5 fill-current" />
+                                Generate Preview
+                              </>
+                            )}
+                          </Button>
+                          {previewUrl && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setPreviewUrl(null)}
+                              className="text-xs text-gray-500 hover:text-gray-900"
+                            >
+                              Show Original Clip
+                            </Button>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="default"
+                            size="sm"
+                            onClick={handleSaveComposition}
+                            disabled={isCompSaving || !composition}
+                            className="text-xs"
+                          >
+                            {isCompSaving ? (
+                              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                            ) : (
+                              <Check className="w-3.5 h-3.5 mr-1.5" />
+                            )}
+                            Save Changes
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleExportFullComposition}
+                            disabled={isExportingFull || isCompSaving}
+                            className="text-xs"
+                          >
+                            {isExportingFull ? (
+                              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                            ) : (
+                              <Download className="w-3.5 h-3.5 mr-1.5" />
+                            )}
+                            Export Full Video
+                          </Button>
+                        </div>
+                      </div>
+
+                      {saveSuccessMsg && (
+                        <p className="text-xs font-medium text-emerald-600 px-1">{saveSuccessMsg}</p>
+                      )}
+                      {conflictError && (
+                        <Alert variant="destructive">
+                          <AlertDescription className="flex items-center justify-between text-xs">
+                            <span>{conflictError}</span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-6 text-[11px]"
+                              onClick={() => void fetchComposition(selectedClip.id)}
+                            >
+                              Reload Composition
+                            </Button>
+                          </AlertDescription>
+                        </Alert>
+                      )}
 
                       {selectedClip && clipRenderProgress[selectedClip.id] != null && (
                         <div className="space-y-1.5 rounded-lg border border-blue-200 bg-blue-50 p-3">
@@ -789,6 +1014,142 @@ export default function TaskEditPage() {
               </Card>
 
               <div className="xl:col-span-5 space-y-4">
+                <div className="flex rounded-lg border bg-gray-100 p-1 text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => setActiveEditorTab("framing")}
+                    className={`flex-1 py-1.5 rounded-md transition ${activeEditorTab === "framing" ? "bg-white shadow-sm font-semibold text-black" : "text-gray-600 hover:text-black"}`}
+                  >
+                    Framing
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveEditorTab("timeline")}
+                    className={`flex-1 py-1.5 rounded-md transition ${activeEditorTab === "timeline" ? "bg-white shadow-sm font-semibold text-black" : "text-gray-600 hover:text-black"}`}
+                  >
+                    Audio &amp; B-Roll
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveEditorTab("subtitles")}
+                    className={`flex-1 py-1.5 rounded-md transition ${activeEditorTab === "subtitles" ? "bg-white shadow-sm font-semibold text-black" : "text-gray-600 hover:text-black"}`}
+                  >
+                    Subtitles
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveEditorTab("trim")}
+                    className={`flex-1 py-1.5 rounded-md transition ${activeEditorTab === "trim" ? "bg-white shadow-sm font-semibold text-black" : "text-gray-600 hover:text-black"}`}
+                  >
+                    Split &amp; FX
+                  </button>
+                </div>
+
+                {activeEditorTab === "framing" && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-base flex items-center gap-2">
+                        <Sparkles className="w-4 h-4 text-purple-600" />
+                        Framing &amp; Reframe
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {composition && composition.segments.length > 0 ? (
+                        <FramingControl
+                          reframe={composition.segments[0].reframe}
+                          onChange={(updatedReframe) => {
+                            const updatedSegments = [...composition.segments];
+                            updatedSegments[0] = {
+                              ...updatedSegments[0],
+                              reframe: updatedReframe,
+                            };
+                            setComposition({
+                              ...composition,
+                              segments: updatedSegments,
+                            });
+                          }}
+                        />
+                      ) : (
+                        <div className="py-6 text-center text-xs text-gray-500">
+                          {isCompLoading ? (
+                            <span className="flex items-center justify-center gap-1.5">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading composition...
+                            </span>
+                          ) : (
+                            "No composition loaded for this clip."
+                          )}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+
+                {activeEditorTab === "timeline" && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-base flex items-center gap-2">
+                        <AudioLines className="w-4 h-4 text-blue-600" />
+                        Timeline, Speed, Sound &amp; B-Roll
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {composition && composition.segments.length > 0 ? (
+                        <TimelineControls
+                          speed={composition.segments[0].speed}
+                          audio={composition.segments[0].audio}
+                          sfxList={composition.sfx}
+                          brollList={composition.broll_inserts}
+                          onSpeedChange={(newSpeed) => {
+                            const updatedSegments = [...composition.segments];
+                            updatedSegments[0] = {
+                              ...updatedSegments[0],
+                              speed: newSpeed,
+                            };
+                            setComposition({
+                              ...composition,
+                              segments: updatedSegments,
+                            });
+                          }}
+                          onAudioChange={(newAudio) => {
+                            const updatedSegments = [...composition.segments];
+                            updatedSegments[0] = {
+                              ...updatedSegments[0],
+                              audio: newAudio,
+                            };
+                            setComposition({
+                              ...composition,
+                              segments: updatedSegments,
+                            });
+                          }}
+                          onSfxChange={(newSfx) => {
+                            setComposition({
+                              ...composition,
+                              sfx: newSfx,
+                            });
+                          }}
+                          onBrollChange={(newBroll) => {
+                            setComposition({
+                              ...composition,
+                              broll_inserts: newBroll,
+                            });
+                          }}
+                        />
+                      ) : (
+                        <div className="py-6 text-center text-xs text-gray-500">
+                          {isCompLoading ? (
+                            <span className="flex items-center justify-center gap-1.5">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading composition...
+                            </span>
+                          ) : (
+                            "No composition loaded for this clip."
+                          )}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+
+                {activeEditorTab === "trim" && (
                 <Card>
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base flex items-center gap-2">
@@ -873,7 +1234,9 @@ export default function TaskEditPage() {
                     </Button>
                   </CardContent>
                 </Card>
+                )}
 
+                {activeEditorTab === "subtitles" && (
                 <Card>
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base flex items-center gap-2">
@@ -985,6 +1348,7 @@ export default function TaskEditPage() {
                     </Button>
                   </CardContent>
                 </Card>
+                )}
               </div>
             </div>
 

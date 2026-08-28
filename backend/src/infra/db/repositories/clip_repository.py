@@ -40,6 +40,8 @@ class ClipRepository:
         metadata_status: str = "pending",
         metadata_version: Optional[str] = None,
         metadata_prompt_version: Optional[str] = None,
+        composition_json: Optional[str] = None,
+        composition_version: int = 1,
     ) -> str:
         """Create a new clip record and return its ID."""
         import json as _json
@@ -55,12 +57,14 @@ class ClipRepository:
                 (id, task_id, filename, file_path, start_time, end_time, duration,
                  text, relevance_score, reasoning, clip_order,
                  virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                 hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version, created_at)
+                 hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version,
+                 composition_json, composition_version, created_at)
                 VALUES
                 (:clip_id, :task_id, :filename, :file_path, :start_time, :end_time, :duration,
                  :text, :relevance_score, :reasoning, :clip_order,
                  :virality_score, :hook_score, :engagement_score, :value_score, :shareability_score, :hook_type,
-                 :hook_title, :description, :hashtags, :metadata_status, :metadata_version, :metadata_prompt_version, NOW())
+                 :hook_title, :description, :hashtags, :metadata_status, :metadata_version, :metadata_prompt_version,
+                 :composition_json, :composition_version, NOW())
                 RETURNING id
             """),
             {
@@ -87,6 +91,8 @@ class ClipRepository:
                 "metadata_status": metadata_status,
                 "metadata_version": metadata_version,
                 "metadata_prompt_version": metadata_prompt_version,
+                "composition_json": composition_json,
+                "composition_version": composition_version,
             },
         )
         await db.commit()
@@ -106,7 +112,8 @@ class ClipRepository:
                 SELECT id, filename, file_path, start_time, end_time, duration,
                        text, relevance_score, reasoning, clip_order, created_at,
                        virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                       hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version
+                       hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version,
+                       composition_json, composition_version
                 FROM generated_clips
                 WHERE task_id = :task_id
                 ORDER BY clip_order ASC
@@ -148,6 +155,8 @@ class ClipRepository:
                     "metadata_status": row.metadata_status or "pending",
                     "metadata_version": row.metadata_version,
                     "metadata_prompt_version": row.metadata_prompt_version,
+                    "composition_json": getattr(row, "composition_json", None),
+                    "composition_version": getattr(row, "composition_version", 1) or 1,
                 }
             )
 
@@ -199,7 +208,8 @@ class ClipRepository:
                 SELECT id, task_id, filename, file_path, start_time, end_time, duration,
                        text, relevance_score, reasoning, clip_order,
                        virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
-                       hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version, created_at
+                       hook_title, description, hashtags, metadata_status, metadata_version, metadata_prompt_version,
+                       composition_json, composition_version, created_at
                 FROM generated_clips
                 WHERE id = :clip_id
                 """
@@ -240,6 +250,8 @@ class ClipRepository:
             "metadata_status": row.metadata_status or "pending",
             "metadata_version": row.metadata_version,
             "metadata_prompt_version": row.metadata_prompt_version,
+            "composition_json": getattr(row, "composition_json", None),
+            "composition_version": getattr(row, "composition_version", 1) or 1,
             "created_at": row.created_at.isoformat(),
             "video_url": f"/tasks/{row.task_id}/clips/{row.id}/file",
         }
@@ -339,5 +351,94 @@ class ClipRepository:
                 "metadata_prompt_version": metadata_prompt_version,
             },
         )
+        await db.commit()
+        return bool(result.rowcount)
+
+    @staticmethod
+    async def update_clip_render_result(
+        db: AsyncSession,
+        clip_id: str,
+        filename: str,
+        file_path: str,
+        duration: float,
+        composition_json: Optional[str] = None,
+        composition_version: int = 1,
+    ) -> bool:
+        """Update clip after re-rendering composition."""
+        result = await db.execute(
+            sa_text(
+                """
+                UPDATE generated_clips
+                SET filename = :filename,
+                    file_path = :file_path,
+                    duration = :duration,
+                    composition_json = COALESCE(:composition_json, composition_json),
+                    composition_version = :composition_version,
+                    updated_at = NOW()
+                WHERE id = :clip_id
+                """
+            ),
+            {
+                "clip_id": clip_id,
+                "filename": filename,
+                "file_path": file_path,
+                "duration": duration,
+                "composition_json": composition_json,
+                "composition_version": composition_version,
+            },
+        )
+        await db.commit()
+        return bool(result.rowcount)
+
+    @staticmethod
+    async def update_clip_composition(
+        db: AsyncSession,
+        clip_id: str,
+        composition_json: str,
+        composition_version: int = 1,
+        expected_version: Optional[int] = None,
+    ) -> bool:
+        """Update clip composition JSON and composition version.
+
+        When expected_version is provided, the UPDATE includes a CAS guard:
+        the row is only modified if its current composition_version matches.
+        Returns False (rowcount == 0) on version mismatch.
+        """
+        if expected_version is not None:
+            result = await db.execute(
+                sa_text(
+                    """
+                    UPDATE generated_clips
+                    SET composition_json = :composition_json,
+                        composition_version = :composition_version,
+                        updated_at = NOW()
+                    WHERE id = :clip_id
+                      AND composition_version = :expected_version
+                    """
+                ),
+                {
+                    "clip_id": clip_id,
+                    "composition_json": composition_json,
+                    "composition_version": composition_version,
+                    "expected_version": expected_version,
+                },
+            )
+        else:
+            result = await db.execute(
+                sa_text(
+                    """
+                    UPDATE generated_clips
+                    SET composition_json = :composition_json,
+                        composition_version = :composition_version,
+                        updated_at = NOW()
+                    WHERE id = :clip_id
+                    """
+                ),
+                {
+                    "clip_id": clip_id,
+                    "composition_json": composition_json,
+                    "composition_version": composition_version,
+                },
+            )
         await db.commit()
         return bool(result.rowcount)

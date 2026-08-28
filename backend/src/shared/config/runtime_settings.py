@@ -19,6 +19,10 @@ SETTINGS_CHANGED_CHANNEL = "settings.changed"
 
 _INVALIDATION_RETRY_DELAY_SECONDS = 5.0
 
+DEFAULT_RENDER_CONCURRENCY = 2
+MIN_RENDER_CONCURRENCY = 1
+MAX_RENDER_CONCURRENCY = 8
+
 RUNTIME_SETTING_KEYS: tuple[str, ...] = (
     "ASSEMBLY_AI_API_KEY",
     "LLM",
@@ -30,6 +34,7 @@ RUNTIME_SETTING_KEYS: tuple[str, ...] = (
     "YOUTUBE_DATA_API_KEY",
     "APIFY_API_TOKEN",
     "PEXELS_API_KEY",
+    "RENDER_CONCURRENCY",
 )
 
 PROCESS_ENV_SETTING_KEYS = frozenset(
@@ -138,6 +143,50 @@ def get_cached_setting(name: str) -> str | None:
 
 def setting_prefers_admin(name: str) -> bool:
     return name in _prefer_admin_value_cache
+
+
+def get_render_concurrency() -> int:
+    """Get the current render concurrency setting (from cached runtime setting or env, clamped 1-8)."""
+    raw = get_cached_setting("RENDER_CONCURRENCY") or os.getenv("RENDER_CONCURRENCY")
+    if raw:
+        try:
+            val = int(raw)
+            return max(MIN_RENDER_CONCURRENCY, min(MAX_RENDER_CONCURRENCY, val))
+        except ValueError:
+            pass
+    return DEFAULT_RENDER_CONCURRENCY
+
+
+async def set_render_concurrency(db: AsyncSession, concurrency: int, updated_by: str | None = None) -> int:
+    """Validate (1-8), update app_settings in DB, update local runtime cache, and publish invalidation."""
+    if not (MIN_RENDER_CONCURRENCY <= concurrency <= MAX_RENDER_CONCURRENCY):
+        raise ValueError(
+            f"render_concurrency must be between {MIN_RENDER_CONCURRENCY} and {MAX_RENDER_CONCURRENCY}"
+        )
+    val_str = str(concurrency)
+    encrypted_value = encrypt_setting_value(val_str)
+    await db.execute(
+        text(
+            """
+            INSERT INTO app_settings (setting_key, encrypted_value, prefer_admin_value, updated_by, updated_at)
+            VALUES ('RENDER_CONCURRENCY', :encrypted_value, true, :updated_by, CURRENT_TIMESTAMP)
+            ON CONFLICT (setting_key) DO UPDATE
+            SET encrypted_value = EXCLUDED.encrypted_value,
+                prefer_admin_value = true,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = CURRENT_TIMESTAMP
+            """
+        ),
+        {
+            "encrypted_value": encrypted_value,
+            "updated_by": updated_by,
+        },
+    )
+    await db.commit()
+    _settings_cache["RENDER_CONCURRENCY"] = val_str
+    _prefer_admin_value_cache.add("RENDER_CONCURRENCY")
+    await publish_settings_changed()
+    return concurrency
 
 
 def apply_settings_to_process_env(resolved_settings: Mapping[str, str | None]) -> None:
